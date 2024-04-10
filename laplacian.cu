@@ -7,7 +7,7 @@ using vector2D = std::vector< std::vector< index_t > >;
 
 // Baseline from: https://stackoverflow.com/questions/44718971/calculate-binomial-coffeficient-very-reliably
 // Requires O(min{k,n-k}), uses pascals triangle approach (+ degenerate cases)
-__device__ inline size_t binom(size_t n, size_t k) noexcept {
+__device__ size_t binom(size_t n, size_t k) {
   return
     (k > n) ? 0 :                  // out of range
     (k == 0 || k == n) ? 1 :       // edge
@@ -34,19 +34,17 @@ __device__ inline size_t binom(size_t n, size_t k) noexcept {
 //     return BT[k][n];
 //   }
 
-//   // Precompute a *larger* table of binomial coefficients
-  void precompute(index_t n, index_t k){
-    pre_n = n;
-    pre_k = k;
-    BT = std::vector< std::vector< value_t > >(k + 1, std::vector< value_t >(n + 1, 0));
-    for (index_t i = 0; i <= n; ++i) {
-      BT[0][i] = 1;
-      for (index_t j = 1; j < std::min(i, k + 1); ++j){
-        BT[j][i] = binom(i,j); // BT[j - 1][i - 1] + BT[j][i - 1];
-      }
-      if (i <= k) { BT[i][i] = 1; };
+// Precompute a *larger* table of binomial coefficients
+void precompute(const index_t n, const index_t k, index_t** BT){
+  // auto BT = std::vector< std::vector< value_t > >(k + 1, std::vector< value_t >(n + 1, 0));
+  for (index_t i = 0; i <= n; ++i) {
+    BT[0][i] = 1;
+    for (index_t j = 1; j < std::min(i, k + 1); ++j){
+      BT[j][i] = binom(i,j); // BT[j - 1][i - 1] + BT[j][i - 1];
     }
+    if (i <= k) { BT[i][i] = 1; };
   }
+}
 // }; // BinomialCoefficientTable
 
 __device__ index_t get_max(index_t top, index_t bottom, const index_t r, const index_t m, const vector2D& BT) noexcept {
