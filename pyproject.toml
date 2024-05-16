@@ -1,0 +1,13 @@
+[build-system]
+build-backend = 'mesonpy'
+requires = ['meson-python', 'numpy', 'pybind11', 'wheel', 'ninja']
+
+[project]
+name = 'comb_laplacian'
+version = '1.0.0'
+description = 'Combinatorial Laplacian package'
+requires-python = '>=3.8'
+license = {file = 'LICENSE'}
+authors = [
+  {name = 'Matt Piekenbrock', email = 'matt.piekenbrock@gmail.com'},
+]
