@@ -7,7 +7,13 @@
 
 python_sources = [
   '__init__.py', 
-  'filtration_cpu.py'
+  'combinatorial_cpu.py',
+  'combinatorial_gpu.py',
+  'filtration_cpu.py', 
+  'filtration_gpu.py', 
+  'laplacian_cpu.py', 
+  'laplacian_gpu.py',
+  'operators.py'
 ]
 
 ## Print install directory

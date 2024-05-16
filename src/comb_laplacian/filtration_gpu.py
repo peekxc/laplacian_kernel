@@ -4,6 +4,7 @@ from numba import float32, int64, uint64, void, cuda
 import numpy as np
 import numba as nb
 import cupy as cp
+from combinatorial_gpu import comb_to_rank_lex2, rank_to_comb_colex, k_boundary_cuda, k_coboundary_cuda
 
 # @cuda.jit(tuple(int64, int64), device=True)
 # def rank_to_comb_lex2(r: int, n: int):
@@ -14,14 +15,14 @@ import cupy as cp
 ## For flag complexes
 # @cuda.jit(float32(int64, int64, int64, float32[:], int64[:,:]), device=True)
 @cuda.jit(device=True)
-def simplex_weight_1(simplex: int, dim: int, n: int, weights: np.ndarray, BT: np.ndarray):
+def flag_weight_1(simplex: int, dim: int, n: int, weights: np.ndarray, BT: np.ndarray):
   labels = cuda.local.array(shape=(2,), dtype=int64)
   rank_to_comb_colex(simplex, n, 2, BT, labels)
   return weights[comb_to_rank_lex2(labels[0], labels[1], n)]
 
 # @cuda.jit(float32(int64, int64, int64, float32[:], int64[:,:]), device=True)
 @cuda.jit(device=True)
-def simplex_weight_2(simplex: int, dim: int, n: int, weights: np.ndarray, BT: np.ndarray):
+def flag_weight_2(simplex: int, dim: int, n: int, weights: np.ndarray, BT: np.ndarray):
   labels = cuda.local.array(shape=(3,), dtype=int64)
   rank_to_comb_colex(simplex, n, 3, BT, labels)
 
@@ -31,7 +32,7 @@ def simplex_weight_2(simplex: int, dim: int, n: int, weights: np.ndarray, BT: np
   return s_weight
 
 @cuda.jit(float32(int64, int64, int64, float32[:], int64[:,:]), device=True)
-def simplex_weight_3(simplex: int, dim: int, n: int, weights: np.ndarray, BT: np.ndarray):
+def flag_weight_3(simplex: int, dim: int, n: int, weights: np.ndarray, BT: np.ndarray):
   labels = cuda.local.array(shape=(4,), dtype=int64)
   rank_to_comb_colex(simplex, n, 4, BT, labels)
 
@@ -44,29 +45,29 @@ def simplex_weight_3(simplex: int, dim: int, n: int, weights: np.ndarray, BT: np
   return s_weight
 
 ## For lower-star
-# @cuda.jit(device=True)
-# def simplex_weight_1(simplex: int, dim: int, n: int, weights: np.ndarray, BT: np.ndarray):
-#   labels = cuda.local.array(shape=(2,), dtype=int64)
-#   rank_to_comb_colex(simplex, n, 2, BT, labels)
-#   return max(weights[labels[0]], weights[labels[1]])
+@cuda.jit(device=True)
+def star_weight_1(simplex: int, dim: int, n: int, weights: np.ndarray, BT: np.ndarray):
+  labels = cuda.local.array(shape=(2,), dtype=int64)
+  rank_to_comb_colex(simplex, n, 2, BT, labels)
+  return max(weights[labels[0]], weights[labels[1]])
 
-# @cuda.jit(device=True)
-# def simplex_weight_2(simplex: int, dim: int, n: int, weights: np.ndarray, BT: np.ndarray):
-#   labels = cuda.local.array(shape=(3,), dtype=int64)
-#   rank_to_comb_colex(simplex, n, 3, BT, labels)
-#   return max(weights[labels[0]], weights[labels[1]], weights[labels[2]])
+@cuda.jit(device=True)
+def star_weight_2(simplex: int, dim: int, n: int, weights: np.ndarray, BT: np.ndarray):
+  labels = cuda.local.array(shape=(3,), dtype=int64)
+  rank_to_comb_colex(simplex, n, 3, BT, labels)
+  return max(weights[labels[0]], weights[labels[1]], weights[labels[2]])
 
-# @cuda.jit(device=True)
-# def simplex_weight_3(simplex: int, dim: int, n: int, weights: np.ndarray, BT: np.ndarray):
-#   labels = cuda.local.array(shape=(4,), dtype=int64)
-#   rank_to_comb_colex(simplex, n, 4, BT, labels)
-#   return max(weights[labels[0]], weights[labels[1]], weights[labels[2]], weights[labels[3]])
+@cuda.jit(device=True)
+def star_weight_3(simplex: int, dim: int, n: int, weights: np.ndarray, BT: np.ndarray):
+  labels = cuda.local.array(shape=(4,), dtype=int64)
+  rank_to_comb_colex(simplex, n, 4, BT, labels)
+  return max(weights[labels[0]], weights[labels[1]], weights[labels[2]], weights[labels[3]])
 
 @cuda.jit(int64(int64, int64, int64, float32[:], int64[:,:]), device=True)
 def cofacet_search_2(simplex: int, dim: int, n: int, weights: np.ndarray, BT: np.ndarray) -> int:
 
   ## Get current simplex weight
-  weight = simplex_weight_2(simplex, dim, n, weights, BT)
+  weight = flag_weight_2(simplex, dim, n, weights, BT)
 
   ## Cofacet search
   # k_cofacets = cuda.local.array(shape=(8-(3),), dtype=int64)
@@ -87,7 +88,7 @@ def cofacet_search_2(simplex: int, dim: int, n: int, weights: np.ndarray, BT: np
     j -= 1
 
     ## If a cofacet with the same weight is found, return it
-    cofacet_weight = simplex_weight_3(cofacet_index, dim+1, n, weights, BT)
+    cofacet_weight = flag_weight_3(cofacet_index, dim+1, n, weights, BT)
     if cofacet_weight == weight or c > 256:
       zero_cofacet = cofacet_index
       break
@@ -97,7 +98,7 @@ def cofacet_search_2(simplex: int, dim: int, n: int, weights: np.ndarray, BT: np
 @cuda.jit(int64(int64, int64, int64, float32[:], int64[:,:]), device=True)
 def zero_facet_2(simplex: int, dim: int, n: int, weights: np.ndarray, BT: np.ndarray) -> int64:
   '''Given a dim-dimensional simplex, find its lexicographically minimal facet with identical simplex weight'''
-  c_weight: float = simplex_weight_2(simplex, dim, n, weights, BT)
+  c_weight: float = flag_weight_2(simplex, dim, n, weights, BT)
   zero_facet: int = -1
 
   ## Compute the boundary of the simplex
@@ -106,7 +107,7 @@ def zero_facet_2(simplex: int, dim: int, n: int, weights: np.ndarray, BT: np.nda
 
   ## Return the first simplex with identical weight if it exists
   for c_facet in k_facets:
-    facet_weight = simplex_weight_1(c_facet, dim-1, n, weights, BT)
+    facet_weight = flag_weight_1(c_facet, dim-1, n, weights, BT)
     # print(f"{c_facet} => {facet_weight:.5f}")
     if facet_weight == c_weight:
       zero_facet = c_facet
@@ -116,7 +117,7 @@ def zero_facet_2(simplex: int, dim: int, n: int, weights: np.ndarray, BT: np.nda
 @cuda.jit(int64(int64, int64, int64, float32[:], int64[:,:]), device=True)
 def zero_facet_3(simplex: int, dim: int, n: int, weights: np.ndarray, BT: np.ndarray) -> int64:
   '''Given a dim-dimensional simplex, find its lexicographically minimal facet with identical simplex weight'''
-  c_weight: float32 = simplex_weight_3(simplex, dim, n, weights, BT)
+  c_weight: float32 = flag_weight_3(simplex, dim, n, weights, BT)
   zero_facet: int64 = (-1)
 
   ## Compute the boundary of the simplex
@@ -125,7 +126,7 @@ def zero_facet_3(simplex: int, dim: int, n: int, weights: np.ndarray, BT: np.nda
 
   ## Return the first simplex with identical weight if it exists
   for c_facet in k_facets:
-    facet_weight = simplex_weight_2(c_facet, dim-1, n, weights, BT)
+    facet_weight = flag_weight_2(c_facet, dim-1, n, weights, BT)
     # print(f"{c_facet} => {facet_weight:.5f}")
     if facet_weight == c_weight:
       zero_facet = c_facet
@@ -138,7 +139,7 @@ def construct_flag_dense_ap(N: int, dim: int, n: int, eps: float, weights: np.nd
   tid = cuda.threadIdx.x + cuda.blockIdx.x * cuda.blockDim.x
   ## Normally we would find AP's; here we only keep non-apparent d-simplices
   if tid < N:
-    w = simplex_weight_2(tid, dim, n, weights, BT)
+    w = flag_weight_2(tid, dim, n, weights, BT)
     if w <= eps:
       c = cofacet_search_2(tid, dim, n, weights, BT)
       z = zero_facet_3(c, dim+1, n, weights, BT)
@@ -146,3 +147,13 @@ def construct_flag_dense_ap(N: int, dim: int, n: int, eps: float, weights: np.nd
         # cx = cuda.atomic.add(cc, 0, 1)
         cx = cuda.atomic.inc(cc, 0, N)
         S[cx] = tid
+
+@cuda.jit(void(int64, int64, int64, float32, float32[:], int64[:,:], int64[:], uint64[:]))
+def construct_flag_dense(N: int, dim: int, n: int, eps: float, weights: np.ndarray, BT: np.ndarray, S: np.ndarray, cc: np.ndarray):
+  """Constructs d-simplices of a dense flag complex up to 'eps', optionally discarding apparent pairs."""
+  tid = cuda.threadIdx.x + cuda.blockIdx.x * cuda.blockDim.x
+  if tid < N:
+    w = flag_weight_2(tid, dim, n, weights, BT)
+    if w <= eps:
+      cx = cuda.atomic.inc(cc, 0, N)
+      S[cx] = tid

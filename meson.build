@@ -1,4 +1,4 @@
-project('claplacian', 'cpp')
+project('comb_laplacian', 'cpp')
 
 pkg_name = meson.project_name()
 py = import('python').find_installation(pure: false)

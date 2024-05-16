@@ -124,7 +124,3 @@ def sp_laplacian1_matvec_cuda(
     cuda.atomic.add(y, j, -(x[j] + x[q]))
     cuda.atomic.add(y, q, x[i] - x[j])
     
-# from cupyx import jit
-
-# @jit.rawkernel()
-    

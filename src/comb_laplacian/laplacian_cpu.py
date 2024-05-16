@@ -5,7 +5,7 @@ import numpy as np
 import numba as nb
 do_bounds_check = True
 
-from combinatorial_cpu import *
+from .combinatorial_cpu import k_boundary_cpu
 
 @nb.jit(nopython=True, boundscheck=do_bounds_check)
 def laplacian0_matvec(x: np.ndarray, y: np.ndarray, n: int, k: int, N: int, BT: np.ndarray, deg: np.ndarray):
