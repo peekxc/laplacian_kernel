@@ -9,8 +9,7 @@ do_parallel = False
 from .combinatorial_cpu import k_boundary_cpu
 
 @nb.jit(nopython=True, parallel=do_parallel, boundscheck=do_bounds_check)
-def laplacian0_matvec(x: np.ndarray, y: np.ndarray, n: int, k: int, N: int, BT: np.ndarray, deg: np.ndarray):
-  np.multiply(x, deg, y) # y = x * deg
+def laplacian0_matvec(x: np.ndarray, y: np.ndarray, n: int, k: int, N: int, BT: np.ndarray):
   ps = np.zeros(2, dtype=np.int32)
   for tid in prange(N):
     k_boundary_cpu(n, tid, k - 1, BT, ps)
@@ -19,8 +18,7 @@ def laplacian0_matvec(x: np.ndarray, y: np.ndarray, n: int, k: int, N: int, BT: 
     y[b] -= x[a]
 
 @nb.jit(nopython=True, parallel=do_parallel, boundscheck=do_bounds_check)
-def laplacian1_matvec(x: np.ndarray, y: np.ndarray, n: int, k: int, N: int, BT: np.ndarray, deg: np.ndarray):
-  np.multiply(x, deg, y) # y = x * deg
+def laplacian1_matvec(x: np.ndarray, y: np.ndarray, n: int, k: int, N: int, BT: np.ndarray):
   ps = np.zeros(4, dtype=np.int32)
   for tid in prange(N):
     k_boundary_cpu(n, tid, k - 1, BT, ps)
@@ -30,8 +28,7 @@ def laplacian1_matvec(x: np.ndarray, y: np.ndarray, n: int, k: int, N: int, BT: 
     y[q] += (x[i] - x[j])
 
 @nb.jit(nopython=True, parallel=do_parallel, boundscheck=do_bounds_check)
-def laplacian2_matvec(x: np.ndarray, y: np.ndarray, n: int, k: int, N: int, BT: np.ndarray, deg: np.ndarray):
-  np.multiply(x, deg, y) # y = x * deg
+def laplacian2_matvec(x: np.ndarray, y: np.ndarray, n: int, k: int, N: int, BT: np.ndarray):
   ps = np.zeros(4, dtype=np.int32)
   for tid in prange(N):
     k_boundary_cpu(n, tid, k - 1, BT, ps)
@@ -42,8 +39,7 @@ def laplacian2_matvec(x: np.ndarray, y: np.ndarray, n: int, k: int, N: int, BT: 
     y[d] += x[b] - (x[a] + x[c])
 
 @nb.jit(nopython=True, parallel=do_parallel, boundscheck=do_bounds_check)
-def laplacian3_matvec(x: np.ndarray, y: np.ndarray, n: int, k: int, N: int, BT: np.ndarray, deg: np.ndarray):
-  np.multiply(x, deg, y) # y = x * deg
+def laplacian3_matvec(x: np.ndarray, y: np.ndarray, n: int, k: int, N: int, BT: np.ndarray):
   ps = np.zeros(5, dtype=np.int32)
   for tid in prange(N):
     k_boundary_cpu(n, tid, k - 1, BT, ps)
@@ -55,8 +51,7 @@ def laplacian3_matvec(x: np.ndarray, y: np.ndarray, n: int, k: int, N: int, BT: 
     y[e] += (x[a] + x[c]) - (x[b] + x[d])
 
 @nb.jit(nopython=True, parallel=do_parallel, boundscheck=do_bounds_check)
-def laplacian4_matvec(x: np.ndarray, y: np.ndarray, n: int, k: int, N: int, BT: np.ndarray, deg: np.ndarray):
-  np.multiply(x, deg, y) # y = x * deg
+def laplacian4_matvec(x: np.ndarray, y: np.ndarray, n: int, k: int, N: int, BT: np.ndarray):
   ps = np.zeros(6, dtype=np.int32)
   for tid in prange(N):
     k_boundary_cpu(n, tid, k - 1, BT, ps)
@@ -69,8 +64,7 @@ def laplacian4_matvec(x: np.ndarray, y: np.ndarray, n: int, k: int, N: int, BT: 
     y[f] += x[b] + x[d] - (x[a] + x[c] + x[e])
 
 @nb.jit(nopython=True, parallel=do_parallel, boundscheck=do_bounds_check)
-def laplacian5_matvec(x: np.ndarray, y: np.ndarray, n: int, k: int, N: int, BT: np.ndarray, deg: np.ndarray):
-  np.multiply(x, deg, y) # y = x * deg
+def laplacian5_matvec(x: np.ndarray, y: np.ndarray, n: int, k: int, N: int, BT: np.ndarray):
   ps = np.zeros(7, dtype=np.int32)
   for tid in prange(N):
     k_boundary_cpu(n, tid, k - 1, BT, ps)
@@ -113,7 +107,6 @@ def sp_laplacian1_matvec(x: np.ndarray, y: np.ndarray, S: np.ndarray, F: np.ndar
 
 @nb.jit(nopython=True, boundscheck=do_bounds_check)
 def sp_laplacian2_matvec(x: np.ndarray, y: np.ndarray, S: np.ndarray, F: np.ndarray, n: int, k: int, BT: np.ndarray):
-  np.multiply(x, deg, y) # y = x * deg
   ps = np.zeros(4, dtype=np.int32)
   for s in S:
     k_boundary_cpu(n, s, k - 1, BT, ps)

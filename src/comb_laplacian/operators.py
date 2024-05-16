@@ -54,8 +54,10 @@ class LaplacianFull(LinearOperator, LaplacianABC):
     self.deg = self.xp.ones(self.N, dtype=np.float32) * (n - k + 1)
     self.nbytes += self.deg.nbytes
     if not gpu:
-      from .laplacian_cpu import laplacian1_matvec, laplacian2_matvec, laplacian3_matvec, laplacian4_matvec, laplacian5_matvec
-      if k == 3:
+      from .laplacian_cpu import laplacian0_matvec, laplacian1_matvec, laplacian2_matvec, laplacian3_matvec, laplacian4_matvec, laplacian5_matvec
+      if k == 2:
+        self.launch_config = laplacian0_matvec
+      elif k == 3:
         self.launch_config = laplacian1_matvec
       elif k == 4:
         self.launch_config = laplacian2_matvec
@@ -92,12 +94,32 @@ class LaplacianFull(LinearOperator, LaplacianABC):
     y = self.xp.asarray(self._y)
     self.xp.multiply(x, self.deg, y)
     # cp.cuda.stream.get_current_stream().synchronize()
-    self.launch_config(x, y, self.n, self.k, self.M, self._BT, self.deg)
+    self.launch_config(x, y, self.n, self.k, self.M, self._BT)
     return self.xp.asnumpy(y) if self.gpu else y
     # return y.get()
   
   def __repr__(self) -> str:
     return LaplacianABC.__repr__(self)
+
+  def tocoo(self):
+    from scipy.sparse import coo_array
+    from array import array
+    x = np.zeros(self.shape[1])
+    I, J, D = array('I'), array('I'), array('f')
+    for j in range(len(x)):
+      x[j-1] = 0
+      x[j] = 1
+      y = self._matvec(x).copy()
+      r = np.flatnonzero(y)
+      I.extend(r)
+      J.extend(np.repeat(j, len(r)))
+      D.extend(y[r])
+    if self.gpu:
+      import cupyx
+      from cupyx.scipy.sparse import coo_matrix as coo
+    else: 
+      from scipy.sparse import coo_array as coo
+    return coo((D, (I,J)), shape=self.shape, dtype=np.float32)
 
 ## Laplacian Sparse Operator
 class LaplacianSparse(LinearOperator, LaplacianABC):

@@ -4,16 +4,22 @@ from math import comb
 from comb_laplacian import LaplacianFull, LaplacianSparse
 from scipy.sparse.linalg import LinearOperator
 
-n, k = 500, 3
+n, k = 5, 2
 L = LaplacianFull(n, k, gpu=False)
 print(L)
 x = np.arange(L.shape[1])
 L @ x
 
+L @ np.eye(L.shape[1])
+
+
 S = np.arange(comb(n, k))
 F = np.arange(comb(n, k-1))
 L = LaplacianSparse(S, F, n=n, k=k, gpu=False)
 print(L)
+
+L @ np.eye(L.shape[1])
+
 L @ x
 
 import timeit
