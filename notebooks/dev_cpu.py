@@ -4,9 +4,11 @@ from math import comb
 from comb_laplacian import LaplacianFull, LaplacianSparse
 from scipy.sparse.linalg import LinearOperator
 
-n, k = 5, 2
+n, k = 10, 3
 L = LaplacianFull(n, k, gpu=False)
 print(L)
+L.tocoo().todense().diagonal()
+
 x = np.arange(L.shape[1])
 L @ x
 

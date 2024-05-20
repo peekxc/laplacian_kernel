@@ -19,7 +19,7 @@ def laplacian0_matvec(x: np.ndarray, y: np.ndarray, n: int, k: int, N: int, BT: 
 
 @nb.jit(nopython=True, parallel=do_parallel, boundscheck=do_bounds_check)
 def laplacian1_matvec(x: np.ndarray, y: np.ndarray, n: int, k: int, N: int, BT: np.ndarray):
-  ps = np.zeros(4, dtype=np.int32)
+  ps = np.zeros(3, dtype=np.int32)
   for tid in prange(N):
     k_boundary_cpu(n, tid, k - 1, BT, ps)
     i,j,q,_= ps
