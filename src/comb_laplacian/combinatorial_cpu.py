@@ -34,7 +34,7 @@ def comb_to_rank_lex2(i: int, j: int, n: int) -> int:
   i, j = (j, i) if j < i else (i, j)
   return int64(n*i - i*(i+1)/2 + j - i - 1)
 
-@nb.jit(device=True)
+@nb.jit(nopython=True,boundscheck=do_bounds_check)
 def rank_to_comb_colex(simplex: int, n: int, k: int, BT: np.ndarray, out: np.ndarray):
   K: int64 = int64(n - 1)
   for ki in range(1, k):
@@ -46,7 +46,7 @@ def rank_to_comb_colex(simplex: int, n: int, k: int, BT: np.ndarray, out: np.nda
   out[-1] = simplex
 
 @nb.jit(nopython=True,boundscheck=do_bounds_check)
-def k_boundary_cpu(n: int, simplex: int, dim: int, BT: np.ndarray, out: np.ndarray):
+def k_boundary_cpu(simplex: int, dim: int, n: int, BT: np.ndarray, out: np.ndarray):
   idx_below: int = simplex
   idx_above: int = 0
   j = n - 1
@@ -57,3 +57,22 @@ def k_boundary_cpu(n: int, simplex: int, dim: int, BT: np.ndarray, out: np.ndarr
     idx_below -= c
     idx_above += BT[k][j]
     out[dim-k] = face_index
+
+@nb.jit(nopython=True,boundscheck=do_bounds_check)
+def k_coboundary_cpu(simplex: int, dim: int, n: int, BT: np.ndarray, out: np.ndarray):
+  idx_below: int64 = int64(simplex)
+  idx_above: int64 = int64(0)
+  j: int64 = int64(n - 1)
+  k: int64 = int64(dim + 1)
+  c: int64 = int64(0)
+  while j >= k:
+    while BT[k][j] <= idx_below:
+      idx_below -= BT[k][j]
+      idx_above += BT[k+1][j]
+      j -= 1
+      k -= 1
+      # assert k != -1, "Coboundary enumeration failed"
+    cofacet_index = idx_above + BT[k+1][j] + idx_below
+    j -= 1
+    out[c] = cofacet_index
+    c += 1

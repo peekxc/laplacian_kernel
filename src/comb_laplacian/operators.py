@@ -14,13 +14,13 @@ def sizeof_fmt(num, suffix="B"):
   return f"{num:.1f}Yi{suffix}"
 
 class LaplacianABC():
-  def __init__(self, n: int, k: int, gpu: bool = False) -> None:
+  def __init__(self, n: int, k: int, N: int, M: int, gpu: bool = False) -> None:
     assert k >= 2, "k must be at least 2"
     self.gpu = gpu
     self.n = n # num vertices
     self.k = k # dim + 1
-    self.N = comb(n,k-1)
-    self.M = comb(n,k)
+    self.N = N ## num of (k-2)-simplices, comb(n,k-1)
+    self.M = M ## num of (k-1)-simplices, comb(n,k)
     self.BT = np.array([[comb(ni, ki) for ni in range(n+1)] for ki in range(k+2)]).astype(np.int64)
     self.shape = (self.N, self.N)
     self.dtype = np.dtype('float32')
@@ -71,7 +71,8 @@ class LaplacianFull(LinearOperator, LaplacianABC):
   """Up-Laplacian operator on the full n-simplex."""
   def __init__(self, n: int, k: int, gpu: bool = False, threadsperblock: int = 32, n_kernels: int = 1):
     assert k >= 2, "k must be at least 2"
-    super(LinearOperator, self).__init__(n, k, gpu) # calls LaplacianABC / excludes LinearOperator
+    M,N = comb(n,k), comb(n,k-1)
+    super(LinearOperator, self).__init__(n, k, N, M, gpu) # calls LaplacianABC / excludes LinearOperator
     self.deg = self.xp.ones(self.N, dtype=np.float32) * (n - k + 1)
     self.nbytes += self.deg.nbytes
     if not gpu:
@@ -132,7 +133,8 @@ class LaplacianSparse(LinearOperator, LaplacianABC):
   ):
     from .laplacian_cpu import sp_precompute_deg
     assert k >= 2, "k must be at least 2"
-    super(LinearOperator, self).__init__(n, k, gpu) # calls LaplacianABC / excludes LinearOperator
+    M,N = len(S), len(F)
+    super(LinearOperator, self).__init__(n, k, N, M, gpu) # calls LaplacianABC / excludes LinearOperator
     
     ## Precompute degree + allocate device memory
     self.deg = self.xp.asarray(sp_precompute_deg(n,k,S,F,self.BT))

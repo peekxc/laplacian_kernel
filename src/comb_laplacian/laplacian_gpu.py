@@ -11,14 +11,13 @@ from .combinatorial_gpu import k_boundary_cuda
 def laplacian1_matvec_cuda(x: np.ndarray, y: np.ndarray, n: int, k: int, N: int, BT: np.ndarray, deg: np.ndarray):
   tid = cuda.threadIdx.x + cuda.blockIdx.x * cuda.blockDim.x
   ps = cuda.local.array(shape=(4,), dtype=int64)
-
   if tid < N:
     k_boundary_cuda(tid, k - 1, n, BT, ps)
-    i, j, q = ps[0], ps[1], ps[2]
-    cuda.atomic.add(y, i, x[q] - x[j])
-    cuda.atomic.add(y, j, -(x[j] + x[q]))
-    cuda.atomic.add(y, q, x[i] - x[j])
-
+    a, b, c = ps[0], ps[1], ps[2]
+    cuda.atomic.add(y, a, x[c] - x[b])
+    cuda.atomic.add(y, b, -(x[a] + x[c]))
+    cuda.atomic.add(y, c, x[a] - x[b])
+    
 @cuda.jit
 def laplacian2_matvec_cuda(x: np.ndarray, y: np.ndarray, n: int, k: int, N: int, BT: np.ndarray, deg: np.ndarray):
   tid = (cuda.threadIdx.x + cuda.blockIdx.x * cuda.blockDim.x)

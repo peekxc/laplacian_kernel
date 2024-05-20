@@ -12,7 +12,7 @@ from .combinatorial_cpu import k_boundary_cpu
 def laplacian0_matvec(x: np.ndarray, y: np.ndarray, n: int, k: int, N: int, BT: np.ndarray):
   ps = np.zeros(2, dtype=np.int32)
   for tid in prange(N):
-    k_boundary_cpu(n, tid, k - 1, BT, ps)
+    k_boundary_cpu(simplex=tid, dim=k-1, n=n, BT=BT, out=ps)
     a,b = ps
     y[a] -= x[b]
     y[b] -= x[a]
@@ -21,7 +21,7 @@ def laplacian0_matvec(x: np.ndarray, y: np.ndarray, n: int, k: int, N: int, BT: 
 def laplacian1_matvec(x: np.ndarray, y: np.ndarray, n: int, k: int, N: int, BT: np.ndarray):
   ps = np.zeros(3, dtype=np.int32)
   for tid in prange(N):
-    k_boundary_cpu(n, tid, k - 1, BT, ps)
+    k_boundary_cpu(simplex=tid, dim=k-1, n=n, BT=BT, out=ps)
     a,b,c = ps    
     y[a] += (x[c] - x[b])
     y[b] -= (x[a] + x[c])
@@ -31,7 +31,7 @@ def laplacian1_matvec(x: np.ndarray, y: np.ndarray, n: int, k: int, N: int, BT: 
 def laplacian2_matvec(x: np.ndarray, y: np.ndarray, n: int, k: int, N: int, BT: np.ndarray):
   ps = np.zeros(4, dtype=np.int32)
   for tid in prange(N):
-    k_boundary_cpu(n, tid, k - 1, BT, ps)
+    k_boundary_cpu(simplex=tid, dim=k-1, n=n, BT=BT, out=ps)
     a,b,c,d = ps
     y[a] += x[c] - (x[b] + x[d])
     y[b] += x[d] - (x[a] + x[c])
@@ -42,7 +42,7 @@ def laplacian2_matvec(x: np.ndarray, y: np.ndarray, n: int, k: int, N: int, BT: 
 def laplacian3_matvec(x: np.ndarray, y: np.ndarray, n: int, k: int, N: int, BT: np.ndarray):
   ps = np.zeros(5, dtype=np.int32)
   for tid in prange(N):
-    k_boundary_cpu(n, tid, k - 1, BT, ps)
+    k_boundary_cpu(simplex=tid, dim=k-1, n=n, BT=BT, out=ps)
     a,b,c,d,e = ps
     y[a] += (x[c] + x[e]) - (x[b] + x[d])
     y[b] += x[d] - (x[a] + x[c] + x[e])
@@ -54,7 +54,7 @@ def laplacian3_matvec(x: np.ndarray, y: np.ndarray, n: int, k: int, N: int, BT: 
 def laplacian4_matvec(x: np.ndarray, y: np.ndarray, n: int, k: int, N: int, BT: np.ndarray):
   ps = np.zeros(6, dtype=np.int32)
   for tid in prange(N):
-    k_boundary_cpu(n, tid, k - 1, BT, ps)
+    k_boundary_cpu(simplex=tid, dim=k-1, n=n, BT=BT, out=ps)
     a,b,c,d,e,f = ps
     y[a] += x[c] + x[e] - (x[b] + x[d] + x[f])
     y[b] += x[d] + x[f] - (x[a] + x[c] + x[e])
@@ -67,7 +67,7 @@ def laplacian4_matvec(x: np.ndarray, y: np.ndarray, n: int, k: int, N: int, BT: 
 def laplacian5_matvec(x: np.ndarray, y: np.ndarray, n: int, k: int, N: int, BT: np.ndarray):
   ps = np.zeros(7, dtype=np.int32)
   for tid in prange(N):
-    k_boundary_cpu(n, tid, k - 1, BT, ps)
+    k_boundary_cpu(simplex=tid, dim=k-1, n=n, BT=BT, out=ps)
     a,b,c,d,e,f,g = ps
     y[a] += x[c] + x[e] + x[g] - (x[b] + x[d] + x[f])
     y[b] += x[d] + x[f] - (x[a] + x[c] + x[e] + x[g])
@@ -82,7 +82,7 @@ def precompute_deg(n: int, k: int, N: int, M: int, BT: np.ndarray) -> np.ndarray
   deg = np.zeros(N)
   k_faces = np.zeros(k, dtype=np.int32)
   for r in prange(M):
-    k_boundary_cpu(n, simplex=r, dim=k-1, BT=BT, out=k_faces)
+    k_boundary_cpu(simplex=s, dim=k-1, n=n, BT=BT, out=ps)
     deg[k_faces] += 1
   return deg
 
@@ -90,7 +90,7 @@ def precompute_deg(n: int, k: int, N: int, M: int, BT: np.ndarray) -> np.ndarray
 def sp_laplacian0_matvec(x: np.ndarray, y: np.ndarray, S: np.ndarray, F: np.ndarray, n: int, k: int, BT: np.ndarray):
   ps = np.zeros(2, dtype=np.int32)
   for s in S:
-    k_boundary_cpu(n, s, k - 1, BT, ps)
+    k_boundary_cpu(simplex=s, dim=k-1, n=n, BT=BT, out=ps)
     a,b = np.searchsorted(F, ps)
     y[a] -= x[b]
     y[b] -= x[a]
@@ -99,7 +99,7 @@ def sp_laplacian0_matvec(x: np.ndarray, y: np.ndarray, S: np.ndarray, F: np.ndar
 def sp_laplacian1_matvec(x: np.ndarray, y: np.ndarray, S: np.ndarray, F: np.ndarray, n: int, k: int, BT: np.ndarray):
   ps = np.zeros(3, dtype=np.int32)
   for s in S:
-    k_boundary_cpu(n, s, k - 1, BT, ps)
+    k_boundary_cpu(simplex=s, dim=k-1, n=n, BT=BT, out=ps)
     a,b,c = np.searchsorted(F, ps)
     y[a] += (x[c] - x[b])
     y[b] -= (x[a] + x[c])
@@ -109,7 +109,7 @@ def sp_laplacian1_matvec(x: np.ndarray, y: np.ndarray, S: np.ndarray, F: np.ndar
 def sp_laplacian2_matvec(x: np.ndarray, y: np.ndarray, S: np.ndarray, F: np.ndarray, n: int, k: int, BT: np.ndarray):
   ps = np.zeros(4, dtype=np.int32)
   for s in S:
-    k_boundary_cpu(n, s, k - 1, BT, ps)
+    k_boundary_cpu(simplex=s, dim=k-1, n=n, BT=BT, out=ps)
     a,b,c,d = np.searchsorted(F, ps)
     y[a] += x[c] - (x[b] + x[d])
     y[b] += x[d] - (x[a] + x[c])
@@ -120,7 +120,7 @@ def sp_laplacian2_matvec(x: np.ndarray, y: np.ndarray, S: np.ndarray, F: np.ndar
 def sp_laplacian3_matvec(x: np.ndarray, y: np.ndarray, S: np.ndarray, F: np.ndarray, n: int, k: int, BT: np.ndarray):
   ps = np.zeros(5, dtype=np.int32)
   for s in S:
-    k_boundary_cpu(n, s, k - 1, BT, ps)
+    k_boundary_cpu(simplex=s, dim=k-1, n=n, BT=BT, out=ps)
     a,b,c,d,e = np.searchsorted(F, ps)
     y[a] += (x[c] + x[e]) - (x[b] + x[d])
     y[b] += x[d] - (x[a] + x[c] + x[e])
@@ -132,7 +132,7 @@ def sp_laplacian3_matvec(x: np.ndarray, y: np.ndarray, S: np.ndarray, F: np.ndar
 def sp_laplacian4_matvec(x: np.ndarray, y: np.ndarray, S: np.ndarray, F: np.ndarray, n: int, k: int, BT: np.ndarray):
   ps = np.zeros(6, dtype=np.int32)
   for s in S:
-    k_boundary_cpu(n, s, k - 1, BT, ps)
+    k_boundary_cpu(simplex=s, dim=k-1, n=n, BT=BT, out=ps)
     a,b,c,d,e,f = np.searchsorted(F, ps)
     y[a] += x[c] + x[e] - (x[b] + x[d] + x[f])
     y[b] += x[d] + x[f] - (x[a] + x[c] + x[e])
@@ -145,7 +145,7 @@ def sp_laplacian4_matvec(x: np.ndarray, y: np.ndarray, S: np.ndarray, F: np.ndar
 def sp_laplacian5_matvec(x: np.ndarray, y: np.ndarray, S: np.ndarray, F: np.ndarray, n: int, k: int, BT: np.ndarray):
   ps = np.zeros(7, dtype=np.int32)
   for s in S:
-    k_boundary_cpu(n, s, k - 1, BT, ps)
+    k_boundary_cpu(simplex=s, dim=k-1, n=n, BT=BT, out=ps)
     a,b,c,d,e,f,g = np.searchsorted(F, ps)
     y[a] += x[c] + x[e] + x[g] - (x[b] + x[d] + x[f])
     y[b] += x[d] + x[f] - (x[a] + x[c] + x[e] + x[g])
@@ -160,6 +160,6 @@ def sp_precompute_deg(n: int, k: int, S: np.ndarray, F: np.ndarray, BT: np.ndarr
   deg = np.zeros(len(F))
   k_faces = np.zeros(k, dtype=np.int32)
   for s in S:
-    k_boundary_cpu(n, simplex=s, dim=k-1, BT=BT, out=k_faces)
+    k_boundary_cpu(simplex=s, dim=k-1, n=n, BT=BT, out=k_faces)
     deg[np.searchsorted(F, k_faces)] += 1
   return deg
