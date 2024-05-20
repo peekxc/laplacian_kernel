@@ -1,6 +1,6 @@
 
 # import _comb_laplacian
-from .operators import LaplacianFull, LaplacianSparse
+from .operators import LaplacianFull, LaplacianSparse, flag_simplices
 
 # def compile_laplacians(gpu: bool = False):
 #   if gpu: 
@@ -10,11 +10,8 @@ from .operators import LaplacianFull, LaplacianSparse
 
 def compile_filtrations(gpu: bool = False):
   if gpu: 
-    from .filtration_gpu import construct_flag_dense, construct_flag_dense_ap
+    from . import filtration_gpu
+    return filtration_gpu
   else:
-    from . import filtration_cpu 
-    from .filtration_cpu import construct_flag_dense, construct_flag_dense_ap
-    return filtration_cpu # construct_flag_dense, construct_flag_dense_ap
-
-
-    # N: int, dim: int, n: int, eps: float, weights: np.ndarray, BT: np.ndarray, S: np.ndarray
+    from . import filtration_cpu  
+    return filtration_cpu

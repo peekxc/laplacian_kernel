@@ -1,4 +1,5 @@
 from typing import Callable
+from numbers import Number
 from math import comb
 from scipy.sparse.linalg import LinearOperator
 
@@ -163,6 +164,14 @@ class LaplacianSparse(LinearOperator, LaplacianABC):
       self.n_kernels = n_kernels
       if k == 3:
         self.launch_config = sp_laplacian1_matvec_cuda[self.blockspergrid, self.threadsperblock]
+      if k == 4:
+        self.launch_config = sp_laplacian2_matvec_cuda[self.blockspergrid, self.threadsperblock]
+      if k == 5:
+        self.launch_config = sp_laplacian3_matvec_cuda[self.blockspergrid, self.threadsperblock]
+      if k == 6:
+        self.launch_config = sp_laplacian4_matvec_cuda[self.blockspergrid, self.threadsperblock]
+      if k == 7:
+        self.launch_config = sp_laplacian5_matvec_cuda[self.blockspergrid, self.threadsperblock]
       else:
         raise ValueError(f"Invalid k = {k}; should be in [3]")
 
@@ -180,3 +189,65 @@ class LaplacianSparse(LinearOperator, LaplacianABC):
   
   # def tocoo(self):
   #   return LaplacianABC.tocoo(self)
+
+def rips_laplacian(X: np.ndarray, p: int = 0, radius: float = "default", sp_mat: bool = False, gpu: bool = False):
+  from scipy.spatial.distance import pdist, cdist, squareform
+  weights = pdist(X)
+  if radius == "default":
+    radius = 0.5 * np.min(np.max(squareform(weights), axis=1)) # enclosing radius 
+  assert isinstance(radius, Number), "Radius must be a number or 'default'."
+  
+  ## Constants
+  n,k,diam = len(X), p+2, 2 * radius
+  
+
+
+  pass 
+
+## Blocked approach to constructing the simplices of a flag filtration up to some threshold
+def flag_simplices(weights: np.ndarray, p: int, eps: float, n_blocks: int = 'auto', discard_ap: bool = True, verbose: bool = False):
+  from .filtration_cpu import construct_flag_dense_ap, construct_flag_dense
+  from array import array
+  from combin import inverse_choose
+  assert isinstance(weights, np.ndarray), "Weights must be a numpy array"
+  n, k = int(inverse_choose(weights.size, 2, exact=True)), p+1
+  N, M = comb(n,k-1), comb(n,k)
+  BT = np.array([[int(comb(ni, ki)) for ni in range(n+1)] for ki in range(k+2)]).astype(np.int64)
+
+  ## Choose the construction function
+  construct_f = construct_flag_dense if not discard_ap else construct_flag_dense_ap
+
+  ## Use the sqrt-heuristic to pick the number of blocks
+  shift = max((int(np.sqrt(n))-1).bit_length() + 1, 1) if n > 20 else 0
+  n_blocks = 1 << shift if n_blocks == 'auto' else int(n_blocks)
+
+  ## Construct the simplices as signed int64's 
+  S = array('q')
+  ns_per_block = M // n_blocks
+  S_out = -1 * np.ones(ns_per_block, dtype=np.int64)
+  for bi in reversed(range(n_blocks)):
+    offset = bi*ns_per_block
+    n_launches = min(M, offset + ns_per_block) - offset
+    S_out.fill(-1)
+    construct_f(n_launches, dim=p, n=n, eps=eps, weights=weights, BT=BT, S=S_out, offset=offset)
+    new_s = S_out[S_out != -1]
+    if verbose: 
+      print(f"block: {n_blocks-(bi + 1)}/{n_blocks}, {p}-simplices: {new_s.size}")
+    S.extend(new_s)
+    if len(new_s) == 0: 
+      break ## Shortcut that is unclear why it works
+  del S_out 
+  return np.asarray(S, dtype=np.int64)
+
+## From: https://stackoverflow.com/questions/3160699/python-progress-bar
+# def progressbar(it, count=None, prefix="", size=60, out=sys.stdout, f: Callable = None, newline: bool = True): # Python3.6+
+#   count = len(it) if count == None else count 
+#   f = (lambda j: "") if f is None else f
+#   def show(j):
+#     x = int(size*j/count)
+#     print(f"{prefix}[{u'█'*x}{('.'*(size-x))}] {j}/{count}" + f(j), end='\r', file=out, flush=True)
+#   show(0)
+#   for i, item in enumerate(it):
+#     yield item
+#     show(i+1)
+#   print("\n" if newline else "", flush=True, file=out)
