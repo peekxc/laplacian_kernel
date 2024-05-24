@@ -43,7 +43,8 @@ def rank_to_comb_colex(simplex: int, n: int, k: int, BT: np.ndarray, out: np.nda
     # assert comb(K-1,m) <= simplex and simplex < comb(K, m)
     out[ki-1] = K-1
     simplex -= BT[m][K-1]
-  out[-1] = simplex
+  # out[-1] = simplex
+  out[k-1] = simplex
 
 @nb.jit(nopython=True,boundscheck=do_bounds_check)
 def k_boundary_cpu(simplex: int, dim: int, n: int, BT: np.ndarray, out: np.ndarray):

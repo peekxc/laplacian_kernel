@@ -157,9 +157,11 @@ def sp_laplacian5_matvec(x: np.ndarray, y: np.ndarray, S: np.ndarray, F: np.ndar
 
 @nb.jit(nopython=True, boundscheck=do_bounds_check)
 def sp_precompute_deg(n: int, k: int, S: np.ndarray, F: np.ndarray, BT: np.ndarray) -> np.ndarray:
-  deg = np.zeros(len(F))
-  k_faces = np.zeros(k, dtype=np.int32)
+  deg = np.zeros(F.size, dtype=np.int64)
+  k_faces = np.zeros(k, dtype=np.int64)
   for s in S:
     k_boundary_cpu(simplex=s, dim=k-1, n=n, BT=BT, out=k_faces)
-    deg[np.searchsorted(F, k_faces)] += 1
+    k_faces = np.searchsorted(F, k_faces)
+    # print(f"{s} => {k_faces}")
+    deg[k_faces] += 1
   return deg

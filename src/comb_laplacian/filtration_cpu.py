@@ -36,12 +36,17 @@ def flag_weight_3(simplex: int, dim: int, n: int, weights: np.ndarray, BT: np.nd
 
 @nb.jit(nopython=True)
 def flag_weight(simplex: int, dim: int, n: int, weights: np.ndarray, BT: np.ndarray):
-  labels = np.zeros(8, dtype=int64)
+  labels = np.zeros(8, dtype=np.int64)
   rank_to_comb_colex(simplex, n, dim+1, BT, labels)
+  # print(labels)
   s_weight = -np.inf
   for i in range(dim+1):
-    for j in range(i, dim+1):
-      s_weight = max(s_weight, weights[comb_to_rank_lex2(labels[i], labels[j], n)])
+    for j in range(i+1, dim+1):
+      r = comb_to_rank_lex2(labels[i], labels[j], n)
+      # print(f"s: {simplex}, ({i},{j}): li: {labels[i]}, lj: {labels[j]}, n:{n}, r:{r}, wr: {weights[r]:.5f}")
+      # print(comb_to_rank_lex2(labels[i], labels[j], n))
+      # s_weight = max(s_weight, weights[comb_to_rank_lex2(labels[i], labels[j], n)])
+      s_weight = max(s_weight, weights[r])
   return s_weight
 
 ## For lower-star
@@ -70,14 +75,13 @@ def star_weight(simplex: int, dim: int, n: int, weights: np.ndarray, BT: np.ndar
   return np.max(weights[labels[:(dim+1)]])
 
 @nb.jit(nopython=True, boundscheck=do_bounds_check)
-def k_cofacet_search_flag(simplex: int, dim: int, n: int, weights: np.ndarray, BT: np.ndarray, max_c: int = 256):
-  weight = flag_weight(simplex, dim, n, weights, BT)
+def zero_cofacet_flag(simplex: int, dim: int, weight: float, n: int, weights: np.ndarray, BT: np.ndarray, max_c: int = 4096):
+  # weight = flag_weight(simplex, dim, n, weights, BT)
   idx_below: int64 = int64(simplex)
   idx_above: int64 = int64(0)
   j: int64 = int64(n - 1)
   k: int64 = int64(dim + 1)
-  c: int64 = int64(0)
-  zero_cofacet: int64 = -1 
+  c: int64 = int64(0) 
   while j >= k:
     while BT[k][j] <= idx_below:
       idx_below -= BT[k][j]
@@ -89,9 +93,8 @@ def k_cofacet_search_flag(simplex: int, dim: int, n: int, weights: np.ndarray, B
     j -= 1
     cofacet_weight = flag_weight(cofacet_index, dim+1, n, weights, BT)
     if cofacet_weight == weight or c > max_c:
-      zero_cofacet = cofacet_index
-      break
-  return zero_cofacet
+      return cofacet_index
+  return -1
 
 @nb.jit(nopython=True)
 def cofacet_search_2(simplex: int, dim: int, n: int, weights: np.ndarray, BT: np.ndarray) -> int:
@@ -125,30 +128,29 @@ def cofacet_search_2(simplex: int, dim: int, n: int, weights: np.ndarray, BT: np
     c += 1
   return zero_cofacet
 
-@nb.jit(nopython=True)
-def zero_facet_2(simplex: int, dim: int, n: int, weights: np.ndarray, BT: np.ndarray) -> int64:
-  '''Given a dim-dimensional simplex, find its lexicographically minimal facet with identical simplex weight'''
-  c_weight: float = flag_weight(simplex, dim, n, weights, BT)
-  zero_facet: int = -1
+# @nb.jit(nopython=True)
+# def zero_facet_2(simplex: int, dim: int, n: int, weights: np.ndarray, BT: np.ndarray) -> int64:
+#   '''Given a dim-dimensional simplex, find its lexicographically minimal facet with identical simplex weight'''
+#   c_weight: float = flag_weight(simplex, dim, n, weights, BT)
+#   zero_facet: int = -1
 
-  ## Compute the boundary of the simplex
-  k_facets = np.zeros(3, dtype=int64)
-  k_boundary_cpu(simplex, dim, n, BT, k_facets)
+#   ## Compute the boundary of the simplex
+#   k_facets = np.zeros(3, dtype=int64)
+#   k_boundary_cpu(simplex, dim, n, BT, k_facets)
 
-  ## Return the first simplex with identical weight if it exists
-  for c_facet in k_facets:
-    facet_weight = flag_weight_1(c_facet, dim-1, n, weights, BT)
-    # print(f"{c_facet} => {facet_weight:.5f}")
-    if facet_weight == c_weight:
-      zero_facet = c_facet
-      break
-  return zero_facet
+#   ## Return the first simplex with identical weight if it exists
+#   for c_facet in k_facets:
+#     facet_weight = flag_weight_1(c_facet, dim-1, n, weights, BT)
+#     # print(f"{c_facet} => {facet_weight:.5f}")
+#     if facet_weight == c_weight:
+#       zero_facet = c_facet
+#       break
+#   return zero_facet
 
 @nb.jit(nopython=True)
 def zero_facet_flag(simplex: int, dim: int, n: int, weights: np.ndarray, BT: np.ndarray) -> int64:
   '''Given a dim-dimensional simplex, find its lexicographically minimal facet with identical simplex weight'''
   c_weight: float = flag_weight(simplex, dim, n, weights, BT)
-  zero_facet: int = -1
 
   ## Compute the boundary of the simplex
   k_facets = np.zeros(8, dtype=int64)
@@ -159,29 +161,34 @@ def zero_facet_flag(simplex: int, dim: int, n: int, weights: np.ndarray, BT: np.
     facet_weight = flag_weight(c_facet, dim-1, n, weights, BT)
     # print(f"{c_facet} => {facet_weight:.5f}")
     if facet_weight == c_weight:
-      zero_facet = c_facet
-      break
-  return zero_facet
+      return c_facet
+  return -1
 
-@nb.jit(int64(int64, int64, int64, float32[:], int64[:,:]), nopython=True)
-def zero_facet_3(simplex: int, dim: int, n: int, weights: np.ndarray, BT: np.ndarray) -> int64:
-  '''Given a dim-dimensional simplex, find its lexicographically minimal facet with identical simplex weight'''
-  c_weight: float32 = flag_weight_3(simplex, dim, n, weights, BT)
-  zero_facet: int64 = (-1)
+# @nb.jit(int64(int64, int64, int64, float32[:], int64[:,:]), nopython=True)
+# def zero_facet_3(simplex: int, dim: int, n: int, weights: np.ndarray, BT: np.ndarray) -> int64:
+#   '''Given a dim-dimensional simplex, find its lexicographically minimal facet with identical simplex weight'''
+#   c_weight: float32 = flag_weight_3(simplex, dim, n, weights, BT)
+#   zero_facet: int64 = (-1)
 
-  ## Compute the boundary of the simplex
-  k_facets = np.zeros(4, dtype=int64)
-  k_boundary_cpu(simplex, dim, n, BT, k_facets)
+#   ## Compute the boundary of the simplex
+#   k_facets = np.zeros(4, dtype=int64)
+#   k_boundary_cpu(simplex, dim, n, BT, k_facets)
 
-  ## Return the first simplex with identical weight if it exists
-  for c_facet in k_facets:
-    facet_weight = flag_weight_2(c_facet, dim-1, n, weights, BT)
-    # print(f"{c_facet} => {facet_weight:.5f}")
-    if facet_weight == c_weight:
-      zero_facet = c_facet
-      break
-  return zero_facet
+#   ## Return the first simplex with identical weight if it exists
+#   for c_facet in k_facets:
+#     facet_weight = flag_weight_2(c_facet, dim-1, n, weights, BT)
+#     # print(f"{c_facet} => {facet_weight:.5f}")
+#     if facet_weight == c_weight:
+#       zero_facet = c_facet
+#       break
+#   return zero_facet
 
+def apparent_blocker(simplex: int, dim: int):
+
+  @nb.jit(nopython=True)
+  def _block():
+    return True
+  
 
 @nb.jit(nopython = True, parallel=True)
 def construct_flag_dense_ap(N: int, dim: int, n: int, eps: float, weights: np.ndarray, BT: np.ndarray, S: np.ndarray, offset: int = 0):
@@ -191,9 +198,8 @@ def construct_flag_dense_ap(N: int, dim: int, n: int, eps: float, weights: np.nd
     s = offset + tid
     w = flag_weight(s, dim, n, weights, BT)
     if w <= eps:
-      c = k_cofacet_search_flag(s, dim, n, weights, BT)
-      z = zero_facet_flag(c, dim+1, n, weights, BT)
-      if c == -1 or s != z:
+      c = zero_cofacet_flag(s, dim, n, weights, BT)
+      if c == -1 or s != zero_facet_flag(c, dim+1, n, weights, BT):
         # print(f"{s}: => c:{c}, z:{z}")
         S[tid] = s # assumes S is large enough 
 
@@ -202,7 +208,7 @@ def construct_flag_dense(N: int, dim: int, n: int, eps: float, weights: np.ndarr
   """Constructs d-simplices of a dense flag complex up to 'eps', optionally discarding apparent pairs."""
   for tid in prange(N):
     s = offset + tid
-    w = flag_weight_2(s, dim, n, weights, BT)
+    w = flag_weight(s, dim, n, weights, BT)
     if w <= eps:
       S[tid] = s
 

@@ -2,11 +2,13 @@
 # import _comb_laplacian
 from .operators import LaplacianFull, LaplacianSparse, flag_simplices
 
-# def compile_laplacians(gpu: bool = False):
-#   if gpu: 
-#     from .laplacian_gpu import *
-#   else: 
-#     from .laplacian_cpu import *
+def compile_laplacians(gpu: bool = False):
+  if gpu: 
+    from . import laplacian_gpu
+    return laplacian_gpu
+  else: 
+    from . import laplacian_cpu
+    return laplacian_cpu
 
 def compile_filtrations(gpu: bool = False):
   if gpu: 

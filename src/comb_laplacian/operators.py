@@ -40,7 +40,7 @@ class LaplacianABC():
   
   def __repr__(self) -> str:
     # runtime_bytes = 3 * ((comb(self.n,self.k-1) * 4) / 1024**3) + (self.n*(self.k+2) * 8)
-    msg = f"Up-Laplacian ({self.N} / {self.M}) - ({self.k-1}/{self.k})-simplices \n"
+    msg = f"Up-Laplacian ({self.N} / {self.M}) - ({self.k-2}/{self.k-1})-simplices \n"
     msg += f"n: {self.n}, k: {self.k}, "
     msg += (f"Memory usage: {sizeof_fmt(self.nbytes)} \n")
     if hasattr(self, "threadsperblock"):
@@ -141,6 +141,7 @@ class LaplacianSparse(LinearOperator, LaplacianABC):
     self.deg = self.xp.asarray(sp_precompute_deg(n,k,S,F,self.BT))
     self.S = self.xp.asarray(S)
     self.F = self.xp.asarray(F)
+    self.F.sort() ## Required for searchsorted
     self.nbytes += (self.deg.nbytes + self.S.nbytes + self.F.nbytes)
 
     if not gpu:
@@ -205,7 +206,7 @@ def rips_laplacian(X: np.ndarray, p: int = 0, radius: float = "default", sp_mat:
   pass 
 
 ## Blocked approach to constructing the simplices of a flag filtration up to some threshold
-def flag_simplices(weights: np.ndarray, p: int, eps: float, n_blocks: int = 'auto', discard_ap: bool = True, verbose: bool = False):
+def flag_simplices(weights: np.ndarray, p: int, eps: float, n_blocks: int = 'auto', discard_ap: bool = True, verbose: bool = False, shortcut: bool = True):
   from .filtration_cpu import construct_flag_dense_ap, construct_flag_dense
   from array import array
   from combin import inverse_choose
@@ -220,21 +221,26 @@ def flag_simplices(weights: np.ndarray, p: int, eps: float, n_blocks: int = 'aut
   ## Use the sqrt-heuristic to pick the number of blocks
   shift = max((int(np.sqrt(n))-1).bit_length() + 1, 1) if n > 20 else 0
   n_blocks = 1 << shift if n_blocks == 'auto' else int(n_blocks)
+  ns_per_block = (M // n_blocks) + 1
+  assert (ns_per_block * n_blocks) >= M, "Bad block configuration"
 
   ## Construct the simplices as signed int64's 
   S = array('q')
-  ns_per_block = M // n_blocks
   S_out = -1 * np.ones(ns_per_block, dtype=np.int64)
+  if verbose: 
+    print(f"enumerating {n_blocks} blocks", flush=True)
   for bi in reversed(range(n_blocks)):
     offset = bi*ns_per_block
-    n_launches = min(M, offset + ns_per_block) - offset
+    # n_launches = min(M, offset + ns_per_block) - offset
+    n_launches = min(ns_per_block, np.abs(M - offset))
+
     S_out.fill(-1)
     construct_f(n_launches, dim=p, n=n, eps=eps, weights=weights, BT=BT, S=S_out, offset=offset)
     new_s = S_out[S_out != -1]
     if verbose: 
-      print(f"block: {n_blocks-(bi + 1)}/{n_blocks}, {p}-simplices: {new_s.size}")
+      print(f"block: {n_blocks-bi}/{n_blocks}, {p}-simplices: {new_s.size}", flush=True)
     S.extend(new_s)
-    if len(new_s) == 0: 
+    if shortcut and len(new_s) == 0: 
       break ## Shortcut that is unclear why it works
   del S_out 
   return np.asarray(S, dtype=np.int64)
