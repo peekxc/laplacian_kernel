@@ -5,10 +5,11 @@ from scipy.sparse.linalg import LinearOperator
 
 import numpy as np
 import numba as nb
+from set_cover.covers import squareform
 
 # https://stackoverflow.com/questions/1094841/get-a-human-readable-version-of-a-file-size
 def sizeof_fmt(num, suffix="B"):
-  for unit in ("", "K", "M", "G", "T", "P", "E", "Z"):
+  for unit in ("", "Ki", "Mi", "Gi", "Ti", "Pi", "Ei", "Zi"):
     if abs(num) < 1024.0:
       return f"{num:3.1f}{unit}{suffix}"
     num /= 1024.0
@@ -211,6 +212,8 @@ def flag_simplices(weights: np.ndarray, p: int, eps: float, n_blocks: int = 'aut
   from array import array
   from combin import inverse_choose
   assert isinstance(weights, np.ndarray), "Weights must be a numpy array"
+  if weights.ndim == 2 and weights.shape[0] == weights.shape[1]:
+    weights = squareform(weights)
   n, k = int(inverse_choose(weights.size, 2, exact=True)), p+1
   N, M = comb(n,k-1), comb(n,k)
   BT = np.array([[int(comb(ni, ki)) for ni in range(n+1)] for ki in range(k+2)]).astype(np.int64)
@@ -233,7 +236,6 @@ def flag_simplices(weights: np.ndarray, p: int, eps: float, n_blocks: int = 'aut
     offset = bi*ns_per_block
     # n_launches = min(M, offset + ns_per_block) - offset
     n_launches = min(ns_per_block, np.abs(M - offset))
-
     S_out.fill(-1)
     construct_f(n_launches, dim=p, n=n, eps=eps, weights=weights, BT=BT, S=S_out, offset=offset)
     new_s = S_out[S_out != -1]

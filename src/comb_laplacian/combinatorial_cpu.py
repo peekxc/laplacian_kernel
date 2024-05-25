@@ -46,6 +46,16 @@ def rank_to_comb_colex(simplex: int, n: int, k: int, BT: np.ndarray, out: np.nda
   # out[-1] = simplex
   out[k-1] = simplex
 
+## Assumes sorted simplex labels
+@nb.jit(nopython=True)
+def comb_to_rank_colex(simplex: list, BT: np.ndarray) -> int64:
+  r = 0
+  d = len(simplex) - 1
+  simplex = np.sort(simplex)
+  for i in range(d + 1):
+    r += BT[d - i + 1][simplex[d-i]]
+  return r 
+
 @nb.jit(nopython=True,boundscheck=do_bounds_check)
 def k_boundary_cpu(simplex: int, dim: int, n: int, BT: np.ndarray, out: np.ndarray):
   idx_below: int = simplex

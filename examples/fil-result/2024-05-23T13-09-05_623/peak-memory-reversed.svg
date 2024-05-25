@@ -1,0 +1,2538 @@
+<?xml version="1.0" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg version="1.1" width="1200" height="5076" onload="init(evt)" viewBox="0 0 1200 5076" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:fg="http://github.com/jonhoo/inferno">
+    <!--Flame graph stack visualization. See https://github.com/brendangregg/FlameGraph for latest version, and http://www.brendangregg.com/flamegraphs.html for examples.-->
+    <!--NOTES: -->
+    <defs>
+        <linearGradient id="background" y1="0" y2="1" x1="0" x2="0">
+            <stop stop-color="#eeeeee" offset="5%"/>
+            <stop stop-color="#eeeeb0" offset="95%"/>
+        </linearGradient>
+    </defs>
+    <style type="text/css">
+text { font-family:monospace; font-size:16px }
+#title { text-anchor:middle; font-size:21px; }
+#matched { text-anchor:end; }
+#search { text-anchor:end; opacity:0.1; cursor:pointer; }
+#search:hover, #search.show { opacity:1; }
+#subtitle { text-anchor:middle; font-color:rgb(160,160,160); }
+#unzoom { cursor:pointer; }
+#frames > *:hover { stroke:black; stroke-width:0.5; cursor:pointer; }
+.hide { display:none; }
+.parent { opacity:0.5; }
+</style>
+    <script type="text/ecmascript"><![CDATA[
+        var nametype = 'Function:';
+        var fontsize = 16;
+        var fontwidth = 0.59;
+        var xpad = 10;
+        var inverted = true;
+        var searchcolor = 'rgb(230,0,230)';
+        var fluiddrawing = true;
+        var truncate_text_right = false;
+    ]]><![CDATA["use strict";
+var details, searchbtn, unzoombtn, matchedtxt, svg, searching, frames, known_font_width;
+function init(evt) {
+    details = document.getElementById("details").firstChild;
+    searchbtn = document.getElementById("search");
+    unzoombtn = document.getElementById("unzoom");
+    matchedtxt = document.getElementById("matched");
+    svg = document.getElementsByTagName("svg")[0];
+    frames = document.getElementById("frames");
+    known_font_width = get_monospace_width(frames);
+    total_samples = parseInt(frames.attributes.total_samples.value);
+    searching = 0;
+
+    // Use GET parameters to restore a flamegraph's state.
+    var restore_state = function() {
+        var params = get_params();
+        if (params.x && params.y)
+            zoom(find_group(document.querySelector('[*|x="' + params.x + '"][y="' + params.y + '"]')));
+        if (params.s)
+            search(params.s);
+    };
+
+    if (fluiddrawing) {
+        // Make width dynamic so the SVG fits its parent's width.
+        svg.removeAttribute("width");
+        // Edge requires us to have a viewBox that gets updated with size changes.
+        var isEdge = /Edge\/\d./i.test(navigator.userAgent);
+        if (!isEdge) {
+            svg.removeAttribute("viewBox");
+        }
+        var update_for_width_change = function() {
+            if (isEdge) {
+                svg.attributes.viewBox.value = "0 0 " + svg.width.baseVal.value + " " + svg.height.baseVal.value;
+            }
+
+            // Keep consistent padding on left and right of frames container.
+            frames.attributes.width.value = svg.width.baseVal.value - xpad * 2;
+
+            // Text truncation needs to be adjusted for the current width.
+            update_text_for_elements(frames.children);
+
+            // Keep search elements at a fixed distance from right edge.
+            var svgWidth = svg.width.baseVal.value;
+            searchbtn.attributes.x.value = svgWidth - xpad;
+            matchedtxt.attributes.x.value = svgWidth - xpad;
+        };
+        window.addEventListener('resize', function() {
+            update_for_width_change();
+        });
+        // This needs to be done asynchronously for Safari to work.
+        setTimeout(function() {
+            unzoom();
+            update_for_width_change();
+            restore_state();
+        }, 0);
+    } else {
+        restore_state();
+    }
+}
+// event listeners
+window.addEventListener("click", function(e) {
+    var target = find_group(e.target);
+    if (target) {
+        if (target.nodeName == "a") {
+            if (e.ctrlKey === false) return;
+            e.preventDefault();
+        }
+        if (target.classList.contains("parent")) unzoom();
+        zoom(target);
+
+        // set parameters for zoom state
+        var el = target.querySelector("rect");
+        if (el && el.attributes && el.attributes.y && el.attributes["fg:x"]) {
+            var params = get_params()
+            params.x = el.attributes["fg:x"].value;
+            params.y = el.attributes.y.value;
+            history.replaceState(null, null, parse_params(params));
+        }
+    }
+    else if (e.target.id == "unzoom") {
+        unzoom();
+
+        // remove zoom state
+        var params = get_params();
+        if (params.x) delete params.x;
+        if (params.y) delete params.y;
+        history.replaceState(null, null, parse_params(params));
+    }
+    else if (e.target.id == "search") search_prompt();
+}, false)
+// mouse-over for info
+// show
+window.addEventListener("mouseover", function(e) {
+    var target = find_group(e.target);
+    if (target) details.nodeValue = nametype + " " + g_to_text(target);
+}, false)
+// clear
+window.addEventListener("mouseout", function(e) {
+    var target = find_group(e.target);
+    if (target) details.nodeValue = ' ';
+}, false)
+// ctrl-F for search
+window.addEventListener("keydown",function (e) {
+    if (e.keyCode === 114 || (e.ctrlKey && e.keyCode === 70)) {
+        e.preventDefault();
+        search_prompt();
+    }
+}, false)
+// functions
+function get_params() {
+    var params = {};
+    var paramsarr = window.location.search.substr(1).split('&');
+    for (var i = 0; i < paramsarr.length; ++i) {
+        var tmp = paramsarr[i].split("=");
+        if (!tmp[0] || !tmp[1]) continue;
+        params[tmp[0]]  = decodeURIComponent(tmp[1]);
+    }
+    return params;
+}
+function parse_params(params) {
+    var uri = "?";
+    for (var key in params) {
+        uri += key + '=' + encodeURIComponent(params[key]) + '&';
+    }
+    if (uri.slice(-1) == "&")
+        uri = uri.substring(0, uri.length - 1);
+    if (uri == '?')
+        uri = window.location.href.split('?')[0];
+    return uri;
+}
+function find_child(node, selector) {
+    var children = node.querySelectorAll(selector);
+    if (children.length) return children[0];
+    return;
+}
+function find_group(node) {
+    var parent = node.parentElement;
+    if (!parent) return;
+    if (parent.id == "frames") return node;
+    return find_group(parent);
+}
+function orig_save(e, attr, val) {
+    if (e.attributes["fg:orig_" + attr] != undefined) return;
+    if (e.attributes[attr] == undefined) return;
+    if (val == undefined) val = e.attributes[attr].value;
+    e.setAttribute("fg:orig_" + attr, val);
+}
+function orig_load(e, attr) {
+    if (e.attributes["fg:orig_"+attr] == undefined) return;
+    e.attributes[attr].value = e.attributes["fg:orig_" + attr].value;
+    e.removeAttribute("fg:orig_" + attr);
+}
+function g_to_text(e) {
+    var text = find_child(e, "title").firstChild.nodeValue;
+    return (text)
+}
+function g_to_func(e) {
+    var func = g_to_text(e);
+    // if there's any manipulation we want to do to the function
+    // name before it's searched, do it here before returning.
+    return (func);
+}
+function get_monospace_width(frames) {
+    // Given the id="frames" element, return the width of text characters if
+    // this is a monospace font, otherwise return 0.
+    text = find_child(frames.children[0], "text");
+    originalContent = text.textContent;
+    text.textContent = "!";
+    bangWidth = text.getComputedTextLength();
+    text.textContent = "W";
+    wWidth = text.getComputedTextLength();
+    text.textContent = originalContent;
+    if (bangWidth === wWidth) {
+        return bangWidth;
+    } else {
+        return 0;
+    }
+}
+function update_text_for_elements(elements) {
+    // In order to render quickly in the browser, you want to do one pass of
+    // reading attributes, and one pass of mutating attributes. See
+    // https://web.dev/avoid-large-complex-layouts-and-layout-thrashing/ for details.
+
+    // Fall back to inefficient calculation, if we're variable-width font.
+    // TODO This should be optimized somehow too.
+    if (known_font_width === 0) {
+        for (var i = 0; i < elements.length; i++) {
+            update_text(elements[i]);
+        }
+        return;
+    }
+
+    var textElemNewAttributes = [];
+    for (var i = 0; i < elements.length; i++) {
+        var e = elements[i];
+        var r = find_child(e, "rect");
+        var t = find_child(e, "text");
+        var w = parseFloat(r.attributes.width.value) * frames.attributes.width.value / 100 - 3;
+        var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+        var newX = format_percent((parseFloat(r.attributes.x.value) + (100 * 3 / frames.attributes.width.value)));
+
+        // Smaller than this size won't fit anything
+        if (w < 2 * known_font_width) {
+            textElemNewAttributes.push([newX, ""]);
+            continue;
+        }
+
+        // Fit in full text width
+        if (txt.length * known_font_width < w) {
+            textElemNewAttributes.push([newX, txt]);
+            continue;
+        }
+
+        var substringLength = Math.floor(w / known_font_width) - 2;
+        if (truncate_text_right) {
+            // Truncate the right side of the text.
+            textElemNewAttributes.push([newX, txt.substring(0, substringLength) + ".."]);
+            continue;
+        } else {
+            // Truncate the left side of the text.
+            textElemNewAttributes.push([newX, ".." + txt.substring(txt.length - substringLength, txt.length)]);
+            continue;
+        }
+    }
+
+    console.assert(textElemNewAttributes.length === elements.length, "Resize failed, please file a bug at https://github.com/jonhoo/inferno/");
+
+    // Now that we know new textContent, set it all in one go so we don't refresh a bazillion times.
+    for (var i = 0; i < elements.length; i++) {
+        var e = elements[i];
+        var values = textElemNewAttributes[i];
+        var t = find_child(e, "text");
+        t.attributes.x.value = values[0];
+        t.textContent = values[1];
+    }
+}
+
+function update_text(e) {
+    var r = find_child(e, "rect");
+    var t = find_child(e, "text");
+    var w = parseFloat(r.attributes.width.value) * frames.attributes.width.value / 100 - 3;
+    var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+    t.attributes.x.value = format_percent((parseFloat(r.attributes.x.value) + (100 * 3 / frames.attributes.width.value)));
+
+    // Smaller than this size won't fit anything
+    if (w < 2 * fontsize * fontwidth) {
+        t.textContent = "";
+        return;
+    }
+    t.textContent = txt;
+    // Fit in full text width
+    if (t.getComputedTextLength() < w)
+        return;
+    if (truncate_text_right) {
+        // Truncate the right side of the text.
+        for (var x = txt.length - 2; x > 0; x--) {
+            if (t.getSubStringLength(0, x + 2) <= w) {
+                t.textContent = txt.substring(0, x) + "..";
+                return;
+            }
+        }
+    } else {
+        // Truncate the left side of the text.
+        for (var x = 2; x < txt.length; x++) {
+            if (t.getSubStringLength(x - 2, txt.length) <= w) {
+                t.textContent = ".." + txt.substring(x, txt.length);
+                return;
+            }
+        }
+    }
+    t.textContent = "";
+}
+// zoom
+function zoom_reset(e) {
+    if (e.tagName == "rect") {
+        e.attributes.x.value = format_percent(100 * parseInt(e.attributes["fg:x"].value) / total_samples);
+        e.attributes.width.value = format_percent(100 * parseInt(e.attributes["fg:w"].value) / total_samples);
+    }
+    if (e.childNodes == undefined) return;
+    for(var i = 0, c = e.childNodes; i < c.length; i++) {
+        zoom_reset(c[i]);
+    }
+}
+function zoom_child(e, x, zoomed_width_samples) {
+    if (e.tagName == "text") {
+        var parent_x = parseFloat(find_child(e.parentNode, "rect[x]").attributes.x.value);
+        e.attributes.x.value = format_percent(parent_x + (100 * 3 / frames.attributes.width.value));
+    } else if (e.tagName == "rect") {
+        e.attributes.x.value = format_percent(100 * (parseInt(e.attributes["fg:x"].value) - x) / zoomed_width_samples);
+        e.attributes.width.value = format_percent(100 * parseInt(e.attributes["fg:w"].value) / zoomed_width_samples);
+    }
+    if (e.childNodes == undefined) return;
+    for(var i = 0, c = e.childNodes; i < c.length; i++) {
+        zoom_child(c[i], x, zoomed_width_samples);
+    }
+}
+function zoom_parent(e) {
+    if (e.attributes) {
+        if (e.attributes.x != undefined) {
+            e.attributes.x.value = "0.0%";
+        }
+        if (e.attributes.width != undefined) {
+            e.attributes.width.value = "100.0%";
+        }
+    }
+    if (e.childNodes == undefined) return;
+    for(var i = 0, c = e.childNodes; i < c.length; i++) {
+        zoom_parent(c[i]);
+    }
+}
+function zoom(node) {
+    var attr = find_child(node, "rect").attributes;
+    var width = parseInt(attr["fg:w"].value);
+    var xmin = parseInt(attr["fg:x"].value);
+    var xmax = xmin + width;
+    var ymin = parseFloat(attr.y.value);
+    unzoombtn.classList.remove("hide");
+    var el = frames.children;
+    var to_update_text = [];
+    for (var i = 0; i < el.length; i++) {
+        var e = el[i];
+        var a = find_child(e, "rect").attributes;
+        var ex = parseInt(a["fg:x"].value);
+        var ew = parseInt(a["fg:w"].value);
+        // Is it an ancestor
+        if (!inverted) {
+            var upstack = parseFloat(a.y.value) > ymin;
+        } else {
+            var upstack = parseFloat(a.y.value) < ymin;
+        }
+        if (upstack) {
+            // Direct ancestor
+            if (ex <= xmin && (ex+ew) >= xmax) {
+                e.classList.add("parent");
+                zoom_parent(e);
+                to_update_text.push(e);
+            }
+            // not in current path
+            else
+                e.classList.add("hide");
+        }
+        // Children maybe
+        else {
+            // no common path
+            if (ex < xmin || ex >= xmax) {
+                e.classList.add("hide");
+            }
+            else {
+                zoom_child(e, xmin, width);
+                to_update_text.push(e);
+            }
+        }
+    }
+    update_text_for_elements(to_update_text);
+}
+function unzoom() {
+    unzoombtn.classList.add("hide");
+    var el = frames.children;
+    for(var i = 0; i < el.length; i++) {
+        el[i].classList.remove("parent");
+        el[i].classList.remove("hide");
+        zoom_reset(el[i]);
+    }
+    update_text_for_elements(el);
+}
+// search
+function reset_search() {
+    var el = document.querySelectorAll("#frames rect");
+    for (var i = 0; i < el.length; i++) {
+        orig_load(el[i], "fill")
+    }
+    var params = get_params();
+    delete params.s;
+    history.replaceState(null, null, parse_params(params));
+}
+function search_prompt() {
+    if (!searching) {
+        var term = prompt("Enter a search term (regexp " +
+            "allowed, eg: ^ext4_)", "");
+        if (term != null) {
+            search(term)
+        }
+    } else {
+        reset_search();
+        searching = 0;
+        searchbtn.classList.remove("show");
+        searchbtn.firstChild.nodeValue = "Search"
+        matchedtxt.classList.add("hide");
+        matchedtxt.firstChild.nodeValue = ""
+    }
+}
+function search(term) {
+    var re = new RegExp(term);
+    var el = frames.children;
+    var matches = new Object();
+    var maxwidth = 0;
+    for (var i = 0; i < el.length; i++) {
+        var e = el[i];
+        // Skip over frames which are either not visible, or below the zoomed-to frame
+        if (e.classList.contains("hide") || e.classList.contains("parent")) {
+            continue;
+        }
+        var func = g_to_func(e);
+        var rect = find_child(e, "rect");
+        if (func == null || rect == null)
+            continue;
+        // Save max width. Only works as we have a root frame
+        var w = parseInt(rect.attributes["fg:w"].value);
+        if (w > maxwidth)
+            maxwidth = w;
+        if (func.match(re)) {
+            // highlight
+            var x = parseInt(rect.attributes["fg:x"].value);
+            orig_save(rect, "fill");
+            rect.attributes.fill.value = searchcolor;
+            // remember matches
+            if (matches[x] == undefined) {
+                matches[x] = w;
+            } else {
+                if (w > matches[x]) {
+                    // overwrite with parent
+                    matches[x] = w;
+                }
+            }
+            searching = 1;
+        }
+    }
+    if (!searching)
+        return;
+    var params = get_params();
+    params.s = term;
+    history.replaceState(null, null, parse_params(params));
+
+    searchbtn.classList.add("show");
+    searchbtn.firstChild.nodeValue = "Reset Search";
+    // calculate percent matched, excluding vertical overlap
+    var count = 0;
+    var lastx = -1;
+    var lastw = 0;
+    var keys = Array();
+    for (k in matches) {
+        if (matches.hasOwnProperty(k))
+            keys.push(k);
+    }
+    // sort the matched frames by their x location
+    // ascending, then width descending
+    keys.sort(function(a, b){
+        return a - b;
+    });
+    // Step through frames saving only the biggest bottom-up frames
+    // thanks to the sort order. This relies on the tree property
+    // where children are always smaller than their parents.
+    for (var k in keys) {
+        var x = parseInt(keys[k]);
+        var w = matches[keys[k]];
+        if (x >= lastx + lastw) {
+            count += w;
+            lastx = x;
+            lastw = w;
+        }
+    }
+    // display matched percent
+    matchedtxt.classList.remove("hide");
+    var pct = 100 * count / maxwidth;
+    if (pct != 100) pct = pct.toFixed(1);
+    matchedtxt.firstChild.nodeValue = "Matched: " + pct + "%";
+}
+function format_percent(n) {
+    return n.toFixed(4) + "%";
+}
+]]></script>
+    <rect x="0" y="0" width="100%" height="5076" fill="url(#background)"/>
+    <text id="title" fill="rgb(0,0,0)" x="50.0000%" y="32.00">Peak Tracked Memory Usage (5562.8 MiB), Reversed</text>
+    <text id="subtitle" x="50.0000%" y="64.00">Made with the Fil profiler. <a href="https://pythonspeed.com/fil/" style="text-decoration: underline;" target="_parent">Try it on your code!</a></text>
+    <text id="details" fill="rgb(0,0,0)" x="10" y="84.00"> </text>
+    <text id="unzoom" class="hide" fill="rgb(0,0,0)" x="10" y="32.00">Reset Zoom</text>
+    <text id="search" fill="rgb(0,0,0)" x="1190" y="32.00">Search</text>
+    <text id="matched" fill="rgb(0,0,0)" x="1190" y="5063.00"> </text>
+    <svg id="frames" x="10" width="1180" total_samples="5814034759">
+        <g>
+            <title>from scipy.linalg import _fblas (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="474" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="487.50">..</text>
+        </g>
+        <g>
+            <title>/Users/mpiekenbrock/opt/miniconda3/envs/spri/lib/python3.11/site-packages/scipy/linalg/blas.py:213 (&lt;module&gt;) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="496" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="509.50">/..</text>
+        </g>
+        <g>
+            <title> (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="518" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="531.50">..</text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:241 (_call_with_frames_removed) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="540" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="553.50">&lt;..</text>
+        </g>
+        <g>
+            <title> (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="562" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="575.50">..</text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap_external&gt;:940 (exec_module) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="584" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="597.50">&lt;..</text>
+        </g>
+        <g>
+            <title> (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="606" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="619.50">..</text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:690 (_load_unlocked) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="628" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="641.50">&lt;..</text>
+        </g>
+        <g>
+            <title> (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="650" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="663.50">..</text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1147 (_find_and_load_unlocked) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="672" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="685.50">&lt;..</text>
+        </g>
+        <g>
+            <title> (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="694" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="707.50">..</text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1176 (_find_and_load) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="716" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="729.50">&lt;..</text>
+        </g>
+        <g>
+            <title>from .blas import get_blas_funcs (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="738" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="751.50">..</text>
+        </g>
+        <g>
+            <title>/Users/mpiekenbrock/opt/miniconda3/envs/spri/lib/python3.11/site-packages/scipy/linalg/_misc.py:3 (&lt;module&gt;) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="760" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="773.50">/..</text>
+        </g>
+        <g>
+            <title> (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="782" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="795.50">..</text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:241 (_call_with_frames_removed) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="804" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="817.50">&lt;..</text>
+        </g>
+        <g>
+            <title> (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="826" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="839.50">..</text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap_external&gt;:940 (exec_module) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="848" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="861.50">&lt;..</text>
+        </g>
+        <g>
+            <title> (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="870" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="883.50">..</text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:690 (_load_unlocked) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="892" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="905.50">&lt;..</text>
+        </g>
+        <g>
+            <title> (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="914" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="927.50">..</text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1147 (_find_and_load_unlocked) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="936" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="949.50">&lt;..</text>
+        </g>
+        <g>
+            <title> (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="958" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="971.50">..</text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1176 (_find_and_load) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="980" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="993.50">&lt;..</text>
+        </g>
+        <g>
+            <title>from ._misc import * (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="1002" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="1015.50">..</text>
+        </g>
+        <g>
+            <title>/Users/mpiekenbrock/opt/miniconda3/envs/spri/lib/python3.11/site-packages/scipy/linalg/__init__.py:203 (&lt;module&gt;) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="1024" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="1037.50">/..</text>
+        </g>
+        <g>
+            <title> (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="1046" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="1059.50">..</text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:241 (_call_with_frames_removed) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="1068" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="1081.50">&lt;..</text>
+        </g>
+        <g>
+            <title> (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="1090" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="1103.50">..</text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap_external&gt;:940 (exec_module) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="1112" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="1125.50">&lt;..</text>
+        </g>
+        <g>
+            <title> (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="1134" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="1147.50">..</text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:690 (_load_unlocked) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="1156" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="1169.50">&lt;..</text>
+        </g>
+        <g>
+            <title> (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="1178" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="1191.50">..</text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1147 (_find_and_load_unlocked) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="1200" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="1213.50">&lt;..</text>
+        </g>
+        <g>
+            <title> (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="1222" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="1235.50">..</text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1176 (_find_and_load) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="1244" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="1257.50">&lt;..</text>
+        </g>
+        <g>
+            <title>from scipy.linalg import get_lapack_funcs (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="1266" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="1279.50">..</text>
+        </g>
+        <g>
+            <title>/Users/mpiekenbrock/opt/miniconda3/envs/spri/lib/python3.11/site-packages/scipy/sparse/linalg/_isolve/iterative.py:5 (&lt;module&gt;) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="1288" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="1301.50">/..</text>
+        </g>
+        <g>
+            <title> (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="1310" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="1323.50">..</text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:241 (_call_with_frames_removed) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="1332" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="1345.50">&lt;..</text>
+        </g>
+        <g>
+            <title> (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="1354" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="1367.50">..</text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap_external&gt;:940 (exec_module) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="1376" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="1389.50">&lt;..</text>
+        </g>
+        <g>
+            <title> (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="1398" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="1411.50">..</text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:690 (_load_unlocked) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="1420" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="1433.50">&lt;..</text>
+        </g>
+        <g>
+            <title> (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="1442" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="1455.50">..</text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1147 (_find_and_load_unlocked) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="1464" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="1477.50">&lt;..</text>
+        </g>
+        <g>
+            <title> (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="1486" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="1499.50">..</text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1176 (_find_and_load) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="1508" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="1521.50">&lt;..</text>
+        </g>
+        <g>
+            <title>from .iterative import * (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="1530" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="1543.50">..</text>
+        </g>
+        <g>
+            <title>/Users/mpiekenbrock/opt/miniconda3/envs/spri/lib/python3.11/site-packages/scipy/sparse/linalg/_isolve/__init__.py:4 (&lt;module&gt;) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="1552" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="1565.50">/..</text>
+        </g>
+        <g>
+            <title> (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="1574" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="1587.50">..</text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:241 (_call_with_frames_removed) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="1596" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="1609.50">&lt;..</text>
+        </g>
+        <g>
+            <title> (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="1618" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="1631.50">..</text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap_external&gt;:940 (exec_module) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="1640" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="1653.50">&lt;..</text>
+        </g>
+        <g>
+            <title> (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="1662" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="1675.50">..</text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:690 (_load_unlocked) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="1684" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="1697.50">&lt;..</text>
+        </g>
+        <g>
+            <title> (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="1706" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="1719.50">..</text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1147 (_find_and_load_unlocked) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="1728" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="1741.50">&lt;..</text>
+        </g>
+        <g>
+            <title> (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="1750" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="1763.50">..</text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1176 (_find_and_load) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="1772" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="1785.50">&lt;..</text>
+        </g>
+        <g>
+            <title>from ._isolve import * (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="1794" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="1807.50">..</text>
+        </g>
+        <g>
+            <title>/Users/mpiekenbrock/opt/miniconda3/envs/spri/lib/python3.11/site-packages/scipy/sparse/linalg/__init__.py:129 (&lt;module&gt;) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="1816" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="1829.50">/..</text>
+        </g>
+        <g>
+            <title> (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="1838" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="1851.50">..</text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:241 (_call_with_frames_removed) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="1860" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="1873.50">&lt;..</text>
+        </g>
+        <g>
+            <title> (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="1882" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="1895.50">..</text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap_external&gt;:940 (exec_module) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="1904" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="1917.50">&lt;..</text>
+        </g>
+        <g>
+            <title> (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="1926" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="1939.50">..</text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:690 (_load_unlocked) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="1948" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="1961.50">&lt;..</text>
+        </g>
+        <g>
+            <title> (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="1970" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="1983.50">..</text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1147 (_find_and_load_unlocked) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="1992" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="2005.50">&lt;..</text>
+        </g>
+        <g>
+            <title> (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="2014" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="2027.50">..</text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1176 (_find_and_load) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="2036" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="2049.50">&lt;..</text>
+        </g>
+        <g>
+            <title>from scipy.sparse.linalg import LinearOperator (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="2058" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="2071.50">..</text>
+        </g>
+        <g>
+            <title>/Users/mpiekenbrock/opt/miniconda3/envs/spri/lib/python3.11/site-packages/scipy/sparse/csgraph/_laplacian.py:7 (&lt;module&gt;) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="2080" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="2093.50">/..</text>
+        </g>
+        <g>
+            <title> (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="2102" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="2115.50">..</text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:241 (_call_with_frames_removed) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="2124" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="2137.50">&lt;..</text>
+        </g>
+        <g>
+            <title> (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="2146" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="2159.50">..</text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap_external&gt;:940 (exec_module) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="2168" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="2181.50">&lt;..</text>
+        </g>
+        <g>
+            <title> (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="2190" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="2203.50">..</text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:690 (_load_unlocked) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="2212" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="2225.50">&lt;..</text>
+        </g>
+        <g>
+            <title> (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="2234" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="2247.50">..</text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1147 (_find_and_load_unlocked) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="2256" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="2269.50">&lt;..</text>
+        </g>
+        <g>
+            <title> (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="2278" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="2291.50">..</text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1176 (_find_and_load) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="2300" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="2313.50">&lt;..</text>
+        </g>
+        <g>
+            <title>from ._laplacian import laplacian (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="2322" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="2335.50">..</text>
+        </g>
+        <g>
+            <title>/Users/mpiekenbrock/opt/miniconda3/envs/spri/lib/python3.11/site-packages/scipy/sparse/csgraph/__init__.py:185 (&lt;module&gt;) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="2344" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="2357.50">/..</text>
+        </g>
+        <g>
+            <title> (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="2366" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="2379.50">..</text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:241 (_call_with_frames_removed) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="2388" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="2401.50">&lt;..</text>
+        </g>
+        <g>
+            <title> (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="2410" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="2423.50">..</text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap_external&gt;:940 (exec_module) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="2432" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="2445.50">&lt;..</text>
+        </g>
+        <g>
+            <title> (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="2454" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="2467.50">..</text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:690 (_load_unlocked) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="2476" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="2489.50">&lt;..</text>
+        </g>
+        <g>
+            <title> (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="2498" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="2511.50">..</text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1147 (_find_and_load_unlocked) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="2520" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="2533.50">&lt;..</text>
+        </g>
+        <g>
+            <title> (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="2542" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="2555.50">..</text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1176 (_find_and_load) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="2564" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="2577.50">&lt;..</text>
+        </g>
+        <g>
+            <title> (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="2586" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="2599.50">..</text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:241 (_call_with_frames_removed) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="2608" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="2621.50">&lt;..</text>
+        </g>
+        <g>
+            <title> (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="2630" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="2643.50">..</text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1232 (_handle_fromlist) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="2652" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="2665.50">&lt;..</text>
+        </g>
+        <g>
+            <title>from . import csgraph (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="2674" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="2687.50">..</text>
+        </g>
+        <g>
+            <title>/Users/mpiekenbrock/opt/miniconda3/envs/spri/lib/python3.11/site-packages/scipy/sparse/__init__.py:308 (&lt;module&gt;) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="2696" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="2709.50">/..</text>
+        </g>
+        <g>
+            <title> (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="2718" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="2731.50">..</text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:241 (_call_with_frames_removed) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="2740" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="2753.50">&lt;..</text>
+        </g>
+        <g>
+            <title> (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="2762" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="2775.50">..</text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap_external&gt;:940 (exec_module) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="2784" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="2797.50">&lt;..</text>
+        </g>
+        <g>
+            <title> (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="2806" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="2819.50">..</text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:690 (_load_unlocked) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="2828" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="2841.50">&lt;..</text>
+        </g>
+        <g>
+            <title> (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="2850" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="2863.50">..</text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1147 (_find_and_load_unlocked) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="2872" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="2885.50">&lt;..</text>
+        </g>
+        <g>
+            <title> (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="2894" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="2907.50">..</text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1176 (_find_and_load) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="2916" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="2929.50">&lt;..</text>
+        </g>
+        <g>
+            <title> (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="2938" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="2951.50">..</text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1204 (_gcd_import) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="2960" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="2973.50">&lt;..</text>
+        </g>
+        <g>
+            <title>    return _bootstrap._gcd_import(name[level:], package, level) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="2982" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="2995.50">..</text>
+        </g>
+        <g>
+            <title>/Users/mpiekenbrock/opt/miniconda3/envs/spri/lib/python3.11/importlib/__init__.py:126 (import_module) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="3004" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="3017.50">/..</text>
+        </g>
+        <g>
+            <title>        return _importlib.import_module(f&apos;scipy.{name}&apos;) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="3026" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="3039.50">..</text>
+        </g>
+        <g>
+            <title>/Users/mpiekenbrock/opt/miniconda3/envs/spri/lib/python3.11/site-packages/scipy/__init__.py:134 (__getattr__) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="3048" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="3061.50">/..</text>
+        </g>
+        <g>
+            <title> (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="3070" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="3083.50">..</text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1229 (_handle_fromlist) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="3092" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="3105.50">&lt;..</text>
+        </g>
+        <g>
+            <title>from scipy import sparse (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="3114" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="3127.50">..</text>
+        </g>
+        <g>
+            <title>/Users/mpiekenbrock/opt/miniconda3/envs/spri/lib/python3.11/site-packages/ripser/ripser.py:28 (&lt;module&gt;) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="3136" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="3149.50">/..</text>
+        </g>
+        <g>
+            <title> (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="3158" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="3171.50">..</text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:241 (_call_with_frames_removed) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="3180" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="3193.50">&lt;..</text>
+        </g>
+        <g>
+            <title> (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="3202" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="3215.50">..</text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap_external&gt;:940 (exec_module) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="3224" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="3237.50">&lt;..</text>
+        </g>
+        <g>
+            <title> (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="3246" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="3259.50">..</text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:690 (_load_unlocked) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="3268" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="3281.50">&lt;..</text>
+        </g>
+        <g>
+            <title> (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="3290" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="3303.50">..</text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1147 (_find_and_load_unlocked) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="3312" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="3325.50">&lt;..</text>
+        </g>
+        <g>
+            <title> (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="3334" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="3347.50">..</text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1176 (_find_and_load) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="3356" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="3369.50">&lt;..</text>
+        </g>
+        <g>
+            <title>from .ripser import * (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="3378" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="3391.50">..</text>
+        </g>
+        <g>
+            <title>/Users/mpiekenbrock/opt/miniconda3/envs/spri/lib/python3.11/site-packages/ripser/__init__.py:1 (&lt;module&gt;) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="3400" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="3413.50">/..</text>
+        </g>
+        <g>
+            <title> (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="3422" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="3435.50">..</text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:241 (_call_with_frames_removed) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="3444" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="3457.50">&lt;..</text>
+        </g>
+        <g>
+            <title> (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="3466" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="3479.50">..</text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap_external&gt;:940 (exec_module) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="3488" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="3501.50">&lt;..</text>
+        </g>
+        <g>
+            <title> (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="3510" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="3523.50">..</text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:690 (_load_unlocked) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="3532" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="3545.50">&lt;..</text>
+        </g>
+        <g>
+            <title> (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="3554" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="3567.50">..</text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1147 (_find_and_load_unlocked) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="3576" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="3589.50">&lt;..</text>
+        </g>
+        <g>
+            <title> (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="3598" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="3611.50">..</text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1176 (_find_and_load) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="3620" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="3633.50">&lt;..</text>
+        </g>
+        <g>
+            <title>from ripser import ripser (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="3642" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="3655.50">..</text>
+        </g>
+        <g>
+            <title>benchmark_ripser_o3_4k.py:4 (&lt;module&gt;) (167,851,610 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="3664" width="2.8870%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="167851610"/>
+            <text x="0.2500%" y="3677.50">b..</text>
+        </g>
+        <g>
+            <title> (168,124,793 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="386" width="2.8917%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="168124793"/>
+            <text x="0.2500%" y="399.50">..</text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:241 (_call_with_frames_removed) (168,124,793 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="408" width="2.8917%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="168124793"/>
+            <text x="0.2500%" y="421.50">&lt;..</text>
+        </g>
+        <g>
+            <title> (168,124,793 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="430" width="2.8917%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="168124793"/>
+            <text x="0.2500%" y="443.50">..</text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1232 (_handle_fromlist) (168,124,793 bytes, 2.89%)</title>
+            <rect x="0.0000%" y="452" width="2.8917%" height="21" fill="rgb(255,224,224)" fg:x="0" fg:w="168124793"/>
+            <text x="0.2500%" y="465.50">&lt;..</text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap_external&gt;:1233 (create_module) (973,505,531 bytes, 16.74%)</title>
+            <rect x="0.0000%" y="188" width="16.7441%" height="21" fill="rgb(255,188,188)" fg:x="0" fg:w="973505531"/>
+            <text x="0.2500%" y="201.50">&lt;frozen importlib._..</text>
+        </g>
+        <g>
+            <title> (973,505,531 bytes, 16.74%)</title>
+            <rect x="0.0000%" y="210" width="16.7441%" height="21" fill="rgb(255,188,188)" fg:x="0" fg:w="973505531"/>
+            <text x="0.2500%" y="223.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:573 (module_from_spec) (973,505,531 bytes, 16.74%)</title>
+            <rect x="0.0000%" y="232" width="16.7441%" height="21" fill="rgb(255,188,188)" fg:x="0" fg:w="973505531"/>
+            <text x="0.2500%" y="245.50">&lt;frozen importlib._..</text>
+        </g>
+        <g>
+            <title> (973,505,531 bytes, 16.74%)</title>
+            <rect x="0.0000%" y="254" width="16.7441%" height="21" fill="rgb(255,188,188)" fg:x="0" fg:w="973505531"/>
+            <text x="0.2500%" y="267.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:676 (_load_unlocked) (973,505,531 bytes, 16.74%)</title>
+            <rect x="0.0000%" y="276" width="16.7441%" height="21" fill="rgb(255,188,188)" fg:x="0" fg:w="973505531"/>
+            <text x="0.2500%" y="289.50">&lt;frozen importlib._..</text>
+        </g>
+        <g>
+            <title> (973,505,531 bytes, 16.74%)</title>
+            <rect x="0.0000%" y="298" width="16.7441%" height="21" fill="rgb(255,188,188)" fg:x="0" fg:w="973505531"/>
+            <text x="0.2500%" y="311.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1147 (_find_and_load_unlocked) (973,505,531 bytes, 16.74%)</title>
+            <rect x="0.0000%" y="320" width="16.7441%" height="21" fill="rgb(255,188,188)" fg:x="0" fg:w="973505531"/>
+            <text x="0.2500%" y="333.50">&lt;frozen importlib._..</text>
+        </g>
+        <g>
+            <title> (973,505,531 bytes, 16.74%)</title>
+            <rect x="0.0000%" y="342" width="16.7441%" height="21" fill="rgb(255,188,188)" fg:x="0" fg:w="973505531"/>
+            <text x="0.2500%" y="355.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1176 (_find_and_load) (973,505,531 bytes, 16.74%)</title>
+            <rect x="0.0000%" y="364" width="16.7441%" height="21" fill="rgb(255,188,188)" fg:x="0" fg:w="973505531"/>
+            <text x="0.2500%" y="377.50">&lt;frozen importlib._..</text>
+        </g>
+        <g>
+            <title>    from sksparse.cholmod import cholesky_AAt (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="386" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="399.50">    from skspa..</text>
+        </g>
+        <g>
+            <title>/Users/mpiekenbrock/opt/miniconda3/envs/spri/lib/python3.11/site-packages/scipy/optimize/_trustregion_constr/projections.py:8 (&lt;module&gt;) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="408" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="421.50">/Users/mpiekenb..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="430" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="443.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:241 (_call_with_frames_removed) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="452" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="465.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="474" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="487.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap_external&gt;:940 (exec_module) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="496" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="509.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="518" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="531.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:690 (_load_unlocked) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="540" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="553.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="562" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="575.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1147 (_find_and_load_unlocked) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="584" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="597.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="606" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="619.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1176 (_find_and_load) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="628" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="641.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title>from .projections import projections (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="650" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="663.50">from .projecti..</text>
+        </g>
+        <g>
+            <title>/Users/mpiekenbrock/opt/miniconda3/envs/spri/lib/python3.11/site-packages/scipy/optimize/_trustregion_constr/equality_constrained_sqp.py:4 (&lt;module&gt;) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="672" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="685.50">/Users/mpiekenb..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="694" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="707.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:241 (_call_with_frames_removed) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="716" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="729.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="738" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="751.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap_external&gt;:940 (exec_module) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="760" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="773.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="782" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="795.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:690 (_load_unlocked) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="804" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="817.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="826" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="839.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1147 (_find_and_load_unlocked) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="848" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="861.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="870" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="883.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1176 (_find_and_load) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="892" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="905.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title>from .equality_constrained_sqp import equality_constrained_sqp (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="914" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="927.50">from .equality..</text>
+        </g>
+        <g>
+            <title>/Users/mpiekenbrock/opt/miniconda3/envs/spri/lib/python3.11/site-packages/scipy/optimize/_trustregion_constr/minimize_trustregion_constr.py:10 (&lt;module&gt;) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="936" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="949.50">/Users/mpiekenb..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="958" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="971.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:241 (_call_with_frames_removed) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="980" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="993.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="1002" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="1015.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap_external&gt;:940 (exec_module) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="1024" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="1037.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="1046" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="1059.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:690 (_load_unlocked) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="1068" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="1081.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="1090" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="1103.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1147 (_find_and_load_unlocked) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="1112" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="1125.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="1134" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="1147.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1176 (_find_and_load) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="1156" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="1169.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title>from .minimize_trustregion_constr import _minimize_trustregion_constr (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="1178" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="1191.50">from .minimize..</text>
+        </g>
+        <g>
+            <title>/Users/mpiekenbrock/opt/miniconda3/envs/spri/lib/python3.11/site-packages/scipy/optimize/_trustregion_constr/__init__.py:4 (&lt;module&gt;) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="1200" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="1213.50">/Users/mpiekenb..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="1222" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="1235.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:241 (_call_with_frames_removed) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="1244" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="1257.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="1266" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="1279.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap_external&gt;:940 (exec_module) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="1288" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="1301.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="1310" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="1323.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:690 (_load_unlocked) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="1332" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="1345.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="1354" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="1367.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1147 (_find_and_load_unlocked) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="1376" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="1389.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="1398" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="1411.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1176 (_find_and_load) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="1420" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="1433.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title>from ._trustregion_constr import _minimize_trustregion_constr (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="1442" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="1455.50">from ._trustre..</text>
+        </g>
+        <g>
+            <title>/Users/mpiekenbrock/opt/miniconda3/envs/spri/lib/python3.11/site-packages/scipy/optimize/_minimize.py:27 (&lt;module&gt;) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="1464" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="1477.50">/Users/mpiekenb..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="1486" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="1499.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:241 (_call_with_frames_removed) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="1508" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="1521.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="1530" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="1543.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap_external&gt;:940 (exec_module) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="1552" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="1565.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="1574" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="1587.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:690 (_load_unlocked) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="1596" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="1609.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="1618" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="1631.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1147 (_find_and_load_unlocked) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="1640" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="1653.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="1662" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="1675.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1176 (_find_and_load) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="1684" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="1697.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title>from ._minimize import * (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="1706" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="1719.50">from ._minimiz..</text>
+        </g>
+        <g>
+            <title>/Users/mpiekenbrock/opt/miniconda3/envs/spri/lib/python3.11/site-packages/scipy/optimize/__init__.py:414 (&lt;module&gt;) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="1728" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="1741.50">/Users/mpiekenb..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="1750" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="1763.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:241 (_call_with_frames_removed) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="1772" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="1785.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="1794" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="1807.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap_external&gt;:940 (exec_module) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="1816" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="1829.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="1838" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="1851.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:690 (_load_unlocked) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="1860" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="1873.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="1882" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="1895.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1147 (_find_and_load_unlocked) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="1904" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="1917.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="1926" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="1939.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1176 (_find_and_load) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="1948" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="1961.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title>from scipy.optimize import milp, LinearConstraint (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="1970" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="1983.50">from scipy.opt..</text>
+        </g>
+        <g>
+            <title>/Users/mpiekenbrock/opt/miniconda3/envs/spri/lib/python3.11/site-packages/scipy/stats/_stats_py.py:42 (&lt;module&gt;) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="1992" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="2005.50">/Users/mpiekenb..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="2014" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="2027.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:241 (_call_with_frames_removed) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="2036" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="2049.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="2058" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="2071.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap_external&gt;:940 (exec_module) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="2080" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="2093.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="2102" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="2115.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:690 (_load_unlocked) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="2124" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="2137.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="2146" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="2159.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1147 (_find_and_load_unlocked) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="2168" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="2181.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="2190" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="2203.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1176 (_find_and_load) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="2212" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="2225.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title>from ._stats_py import * (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="2234" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="2247.50">from ._stats_p..</text>
+        </g>
+        <g>
+            <title>/Users/mpiekenbrock/opt/miniconda3/envs/spri/lib/python3.11/site-packages/scipy/stats/__init__.py:606 (&lt;module&gt;) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="2256" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="2269.50">/Users/mpiekenb..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="2278" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="2291.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:241 (_call_with_frames_removed) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="2300" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="2313.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="2322" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="2335.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap_external&gt;:940 (exec_module) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="2344" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="2357.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="2366" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="2379.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:690 (_load_unlocked) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="2388" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="2401.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="2410" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="2423.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1147 (_find_and_load_unlocked) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="2432" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="2445.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="2454" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="2467.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1176 (_find_and_load) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="2476" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="2489.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title>import scipy.stats (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="2498" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="2511.50">import scipy.s..</text>
+        </g>
+        <g>
+            <title>/Users/mpiekenbrock/opt/miniconda3/envs/spri/lib/python3.11/site-packages/sklearn/utils/fixes.py:18 (&lt;module&gt;) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="2520" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="2533.50">/Users/mpiekenb..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="2542" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="2555.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:241 (_call_with_frames_removed) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="2564" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="2577.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="2586" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="2599.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap_external&gt;:940 (exec_module) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="2608" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="2621.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="2630" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="2643.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:690 (_load_unlocked) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="2652" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="2665.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="2674" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="2687.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1147 (_find_and_load_unlocked) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="2696" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="2709.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="2718" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="2731.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1176 (_find_and_load) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="2740" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="2753.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title>from .fixes import parse_version (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="2762" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="2775.50">from .fixes im..</text>
+        </g>
+        <g>
+            <title>/Users/mpiekenbrock/opt/miniconda3/envs/spri/lib/python3.11/site-packages/sklearn/utils/_array_api.py:9 (&lt;module&gt;) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="2784" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="2797.50">/Users/mpiekenb..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="2806" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="2819.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:241 (_call_with_frames_removed) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="2828" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="2841.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="2850" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="2863.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap_external&gt;:940 (exec_module) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="2872" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="2885.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="2894" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="2907.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:690 (_load_unlocked) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="2916" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="2929.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="2938" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="2951.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1147 (_find_and_load_unlocked) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="2960" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="2973.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="2982" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="2995.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1176 (_find_and_load) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="3004" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="3017.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title>from ..utils._array_api import _asarray_with_order, _is_numpy_namespace, get_namespace (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="3026" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="3039.50">from ..utils._..</text>
+        </g>
+        <g>
+            <title>/Users/mpiekenbrock/opt/miniconda3/envs/spri/lib/python3.11/site-packages/sklearn/utils/validation.py:28 (&lt;module&gt;) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="3048" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="3061.50">/Users/mpiekenb..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="3070" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="3083.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:241 (_call_with_frames_removed) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="3092" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="3105.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="3114" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="3127.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap_external&gt;:940 (exec_module) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="3136" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="3149.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="3158" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="3171.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:690 (_load_unlocked) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="3180" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="3193.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="3202" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="3215.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1147 (_find_and_load_unlocked) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="3224" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="3237.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="3246" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="3259.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1176 (_find_and_load) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="3268" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="3281.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title>from .validation import _is_arraylike_not_scalar (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="3290" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="3303.50">from .validati..</text>
+        </g>
+        <g>
+            <title>/Users/mpiekenbrock/opt/miniconda3/envs/spri/lib/python3.11/site-packages/sklearn/utils/_param_validation.py:15 (&lt;module&gt;) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="3312" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="3325.50">/Users/mpiekenb..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="3334" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="3347.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:241 (_call_with_frames_removed) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="3356" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="3369.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="3378" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="3391.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap_external&gt;:940 (exec_module) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="3400" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="3413.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="3422" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="3435.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:690 (_load_unlocked) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="3444" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="3457.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="3466" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="3479.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1147 (_find_and_load_unlocked) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="3488" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="3501.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="3510" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="3523.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1176 (_find_and_load) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="3532" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="3545.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title>from ._param_validation import Interval, validate_params (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="3554" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="3567.50">from ._param_v..</text>
+        </g>
+        <g>
+            <title>/Users/mpiekenbrock/opt/miniconda3/envs/spri/lib/python3.11/site-packages/sklearn/utils/__init__.py:22 (&lt;module&gt;) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="3576" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="3589.50">/Users/mpiekenb..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="3598" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="3611.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:241 (_call_with_frames_removed) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="3620" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="3633.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="3642" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="3655.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap_external&gt;:940 (exec_module) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="3664" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="3677.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="3686" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="3699.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:690 (_load_unlocked) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="3708" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="3721.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="3730" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="3743.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1147 (_find_and_load_unlocked) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="3752" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="3765.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="3774" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="3787.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1176 (_find_and_load) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="3796" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="3809.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title>from .utils import _IS_32BIT (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="3818" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="3831.50">from .utils im..</text>
+        </g>
+        <g>
+            <title>/Users/mpiekenbrock/opt/miniconda3/envs/spri/lib/python3.11/site-packages/sklearn/base.py:19 (&lt;module&gt;) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="3840" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="3853.50">/Users/mpiekenb..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="3862" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="3875.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:241 (_call_with_frames_removed) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="3884" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="3897.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="3906" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="3919.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap_external&gt;:940 (exec_module) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="3928" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="3941.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="3950" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="3963.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:690 (_load_unlocked) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="3972" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="3985.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="3994" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="4007.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1147 (_find_and_load_unlocked) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="4016" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="4029.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="4038" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="4051.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1176 (_find_and_load) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="4060" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="4073.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title>    from .base import clone (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="4082" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="4095.50">    from .base..</text>
+        </g>
+        <g>
+            <title>/Users/mpiekenbrock/opt/miniconda3/envs/spri/lib/python3.11/site-packages/sklearn/__init__.py:83 (&lt;module&gt;) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="4104" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="4117.50">/Users/mpiekenb..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="4126" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="4139.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:241 (_call_with_frames_removed) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="4148" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="4161.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="4170" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="4183.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap_external&gt;:940 (exec_module) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="4192" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="4205.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="4214" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="4227.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:690 (_load_unlocked) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="4236" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="4249.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="4258" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="4271.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1147 (_find_and_load_unlocked) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="4280" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="4293.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="4302" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="4315.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1176 (_find_and_load) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="4324" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="4337.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="4346" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="4359.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:241 (_call_with_frames_removed) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="4368" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="4381.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="4390" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="4403.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1126 (_find_and_load_unlocked) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="4412" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="4425.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="4434" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="4447.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1176 (_find_and_load) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="4456" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="4469.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title>from sklearn.base import TransformerMixin (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="4478" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="4491.50">from sklearn.b..</text>
+        </g>
+        <g>
+            <title>/Users/mpiekenbrock/opt/miniconda3/envs/spri/lib/python3.11/site-packages/ripser/ripser.py:31 (&lt;module&gt;) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="4500" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="4513.50">/Users/mpiekenb..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="4522" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="4535.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:241 (_call_with_frames_removed) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="4544" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="4557.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="4566" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="4579.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap_external&gt;:940 (exec_module) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="4588" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="4601.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="4610" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="4623.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:690 (_load_unlocked) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="4632" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="4645.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="4654" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="4667.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1147 (_find_and_load_unlocked) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="4676" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="4689.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="4698" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="4711.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1176 (_find_and_load) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="4720" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="4733.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title>from .ripser import * (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="4742" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="4755.50">from .ripser i..</text>
+        </g>
+        <g>
+            <title>/Users/mpiekenbrock/opt/miniconda3/envs/spri/lib/python3.11/site-packages/ripser/__init__.py:1 (&lt;module&gt;) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="4764" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="4777.50">/Users/mpiekenb..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="4786" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="4799.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:241 (_call_with_frames_removed) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="4808" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="4821.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="4830" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="4843.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap_external&gt;:940 (exec_module) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="4852" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="4865.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="4874" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="4887.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:690 (_load_unlocked) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="4896" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="4909.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="4918" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="4931.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1147 (_find_and_load_unlocked) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="4940" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="4953.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title> (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="4962" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="4975.50"></text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:1176 (_find_and_load) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="4984" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="4997.50">&lt;frozen importl..</text>
+        </g>
+        <g>
+            <title>from ripser import ripser (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="5006" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="5019.50">from ripser im..</text>
+        </g>
+        <g>
+            <title>benchmark_ripser_o3_4k.py:4 (&lt;module&gt;) (805,316,885 bytes, 13.85%)</title>
+            <rect x="2.8928%" y="5028" width="13.8513%" height="21" fill="rgb(255,194,194)" fg:x="168188646" fg:w="805316885"/>
+            <text x="3.1428%" y="5041.50">benchmark_ripse..</text>
+        </g>
+        <g>
+            <title>&lt;frozen importlib._bootstrap&gt;:241 (_call_with_frames_removed) (975,054,901 bytes, 16.77%)</title>
+            <rect x="0.0000%" y="144" width="16.7707%" height="21" fill="rgb(255,188,188)" fg:x="0" fg:w="975054901"/>
+            <text x="0.2500%" y="157.50">&lt;frozen importlib._..</text>
+        </g>
+        <g>
+            <title> (975,054,901 bytes, 16.77%)</title>
+            <rect x="0.0000%" y="166" width="16.7707%" height="21" fill="rgb(255,188,188)" fg:x="0" fg:w="975054901"/>
+            <text x="0.2500%" y="179.50"></text>
+        </g>
+        <g>
+            <title> (985,797,678 bytes, 16.96%)</title>
+            <rect x="0.0000%" y="122" width="16.9555%" height="21" fill="rgb(255,188,188)" fg:x="0" fg:w="985797678"/>
+            <text x="0.2500%" y="135.50"></text>
+        </g>
+        <g>
+            <title>        DParam = np.array(dm[I &gt; J], dtype=np.float32) (33,546,336 bytes, 0.58%)</title>
+            <rect x="16.9555%" y="122" width="0.5770%" height="21" fill="rgb(255,238,238)" fg:x="985797678" fg:w="33546336"/>
+            <text x="17.2055%" y="135.50"></text>
+        </g>
+        <g>
+            <title>/Users/mpiekenbrock/opt/miniconda3/envs/spri/lib/python3.11/site-packages/ripser/ripser.py:320 (ripser) (33,546,336 bytes, 0.58%)</title>
+            <rect x="16.9555%" y="144" width="0.5770%" height="21" fill="rgb(255,238,238)" fg:x="985797678" fg:w="33546336"/>
+            <text x="17.2055%" y="157.50"></text>
+        </g>
+        <g>
+            <title>out = ripser(X, maxdim=3, thresh=1.4) (33,546,336 bytes, 0.58%)</title>
+            <rect x="16.9555%" y="166" width="0.5770%" height="21" fill="rgb(255,238,238)" fg:x="985797678" fg:w="33546336"/>
+            <text x="17.2055%" y="179.50"></text>
+        </g>
+        <g>
+            <title>benchmark_ripser_o3_4k.py:7 (&lt;module&gt;) (33,546,336 bytes, 0.58%)</title>
+            <rect x="16.9555%" y="188" width="0.5770%" height="21" fill="rgb(255,238,238)" fg:x="985797678" fg:w="33546336"/>
+            <text x="17.2055%" y="201.50"></text>
+        </g>
+        <g>
+            <title>        output = [x.copy() for x in output] (268,435,648 bytes, 4.62%)</title>
+            <rect x="17.5325%" y="122" width="4.6170%" height="21" fill="rgb(255,217,217)" fg:x="1019344014" fg:w="268435648"/>
+            <text x="17.7825%" y="135.50">  ..</text>
+        </g>
+        <g>
+            <title>/Users/mpiekenbrock/opt/miniconda3/envs/spri/lib/python3.11/site-packages/numpy/lib/function_base.py:5163 (&lt;listcomp&gt;) (268,435,648 bytes, 4.62%)</title>
+            <rect x="17.5325%" y="144" width="4.6170%" height="21" fill="rgb(255,217,217)" fg:x="1019344014" fg:w="268435648"/>
+            <text x="17.7825%" y="157.50">/Us..</text>
+        </g>
+        <g>
+            <title>        output = [x.copy() for x in output] (268,435,648 bytes, 4.62%)</title>
+            <rect x="17.5325%" y="166" width="4.6170%" height="21" fill="rgb(255,217,217)" fg:x="1019344014" fg:w="268435648"/>
+            <text x="17.7825%" y="179.50">  ..</text>
+        </g>
+        <g>
+            <title>/Users/mpiekenbrock/opt/miniconda3/envs/spri/lib/python3.11/site-packages/numpy/lib/function_base.py:5163 (meshgrid) (268,435,648 bytes, 4.62%)</title>
+            <rect x="17.5325%" y="188" width="4.6170%" height="21" fill="rgb(255,217,217)" fg:x="1019344014" fg:w="268435648"/>
+            <text x="17.7825%" y="201.50">/Us..</text>
+        </g>
+        <g>
+            <title>        I, J = np.meshgrid(np.arange(n_points), np.arange(n_points)) (268,435,648 bytes, 4.62%)</title>
+            <rect x="17.5325%" y="210" width="4.6170%" height="21" fill="rgb(255,217,217)" fg:x="1019344014" fg:w="268435648"/>
+            <text x="17.7825%" y="223.50">  ..</text>
+        </g>
+        <g>
+            <title>/Users/mpiekenbrock/opt/miniconda3/envs/spri/lib/python3.11/site-packages/ripser/ripser.py:319 (ripser) (268,435,648 bytes, 4.62%)</title>
+            <rect x="17.5325%" y="232" width="4.6170%" height="21" fill="rgb(255,217,217)" fg:x="1019344014" fg:w="268435648"/>
+            <text x="17.7825%" y="245.50">/Us..</text>
+        </g>
+        <g>
+            <title>out = ripser(X, maxdim=3, thresh=1.4) (268,435,648 bytes, 4.62%)</title>
+            <rect x="17.5325%" y="254" width="4.6170%" height="21" fill="rgb(255,217,217)" fg:x="1019344014" fg:w="268435648"/>
+            <text x="17.7825%" y="267.50">ou..</text>
+        </g>
+        <g>
+            <title>benchmark_ripser_o3_4k.py:7 (&lt;module&gt;) (268,435,648 bytes, 4.62%)</title>
+            <rect x="17.5325%" y="276" width="4.6170%" height="21" fill="rgb(255,217,217)" fg:x="1019344014" fg:w="268435648"/>
+            <text x="17.7825%" y="289.50">ben..</text>
+        </g>
+        <g>
+            <title>        res = DRFDM(DParam, maxdim, thresh, coeff, do_cocycles) (4,391,742,180 bytes, 75.54%)</title>
+            <rect x="22.1495%" y="122" width="75.5369%" height="21" fill="rgb(255,119,119)" fg:x="1287779662" fg:w="4391742180"/>
+            <text x="22.3995%" y="135.50">        res = DRFDM(DParam, maxdim, thresh, coeff, do_cocycles)</text>
+        </g>
+        <g>
+            <title>/Users/mpiekenbrock/opt/miniconda3/envs/spri/lib/python3.11/site-packages/ripser/ripser.py:321 (ripser) (4,391,742,180 bytes, 75.54%)</title>
+            <rect x="22.1495%" y="144" width="75.5369%" height="21" fill="rgb(255,119,119)" fg:x="1287779662" fg:w="4391742180"/>
+            <text x="22.3995%" y="157.50">/Users/mpiekenbrock/opt/miniconda3/envs/spri/lib/python3.11/site-packages/ripser/ripser.py:321..</text>
+        </g>
+        <g>
+            <title>out = ripser(X, maxdim=3, thresh=1.4) (4,391,742,180 bytes, 75.54%)</title>
+            <rect x="22.1495%" y="166" width="75.5369%" height="21" fill="rgb(255,119,119)" fg:x="1287779662" fg:w="4391742180"/>
+            <text x="22.3995%" y="179.50">out = ripser(X, maxdim=3, thresh=1.4)</text>
+        </g>
+        <g>
+            <title>benchmark_ripser_o3_4k.py:7 (&lt;module&gt;) (4,391,742,180 bytes, 75.54%)</title>
+            <rect x="22.1495%" y="188" width="75.5369%" height="21" fill="rgb(255,119,119)" fg:x="1287779662" fg:w="4391742180"/>
+            <text x="22.3995%" y="201.50">benchmark_ripser_o3_4k.py:7 (&lt;module&gt;)</text>
+        </g>
+        <g>
+            <title>        ret = a @ b (134,217,856 bytes, 2.31%)</title>
+            <rect x="97.6864%" y="122" width="2.3085%" height="21" fill="rgb(255,227,227)" fg:x="5679521842" fg:w="134217856"/>
+            <text x="97.9364%" y="135.50"></text>
+        </g>
+        <g>
+            <title>/Users/mpiekenbrock/opt/miniconda3/envs/spri/lib/python3.11/site-packages/sklearn/utils/extmath.py:193 (safe_sparse_dot) (134,217,856 bytes, 2.31%)</title>
+            <rect x="97.6864%" y="144" width="2.3085%" height="21" fill="rgb(255,227,227)" fg:x="5679521842" fg:w="134217856"/>
+            <text x="97.9364%" y="157.50"></text>
+        </g>
+        <g>
+            <title>        distances = -2 * safe_sparse_dot(X, Y.T, dense_output=True) (134,217,856 bytes, 2.31%)</title>
+            <rect x="97.6864%" y="166" width="2.3085%" height="21" fill="rgb(255,227,227)" fg:x="5679521842" fg:w="134217856"/>
+            <text x="97.9364%" y="179.50"></text>
+        </g>
+        <g>
+            <title>/Users/mpiekenbrock/opt/miniconda3/envs/spri/lib/python3.11/site-packages/sklearn/metrics/pairwise.py:379 (_euclidean_distances) (134,217,856 bytes, 2.31%)</title>
+            <rect x="97.6864%" y="188" width="2.3085%" height="21" fill="rgb(255,227,227)" fg:x="5679521842" fg:w="134217856"/>
+            <text x="97.9364%" y="201.50"></text>
+        </g>
+        <g>
+            <title>    return _euclidean_distances(X, Y, X_norm_squared, Y_norm_squared, squared) (134,217,856 bytes, 2.31%)</title>
+            <rect x="97.6864%" y="210" width="2.3085%" height="21" fill="rgb(255,227,227)" fg:x="5679521842" fg:w="134217856"/>
+            <text x="97.9364%" y="223.50"></text>
+        </g>
+        <g>
+            <title>/Users/mpiekenbrock/opt/miniconda3/envs/spri/lib/python3.11/site-packages/sklearn/metrics/pairwise.py:338 (euclidean_distances) (134,217,856 bytes, 2.31%)</title>
+            <rect x="97.6864%" y="232" width="2.3085%" height="21" fill="rgb(255,227,227)" fg:x="5679521842" fg:w="134217856"/>
+            <text x="97.9364%" y="245.50"></text>
+        </g>
+        <g>
+            <title>        return func(X, Y, **kwds) (134,217,856 bytes, 2.31%)</title>
+            <rect x="97.6864%" y="254" width="2.3085%" height="21" fill="rgb(255,227,227)" fg:x="5679521842" fg:w="134217856"/>
+            <text x="97.9364%" y="267.50"></text>
+        </g>
+        <g>
+            <title>/Users/mpiekenbrock/opt/miniconda3/envs/spri/lib/python3.11/site-packages/sklearn/metrics/pairwise.py:1765 (_parallel_pairwise) (134,217,856 bytes, 2.31%)</title>
+            <rect x="97.6864%" y="276" width="2.3085%" height="21" fill="rgb(255,227,227)" fg:x="5679521842" fg:w="134217856"/>
+            <text x="97.9364%" y="289.50"></text>
+        </g>
+        <g>
+            <title>    return _parallel_pairwise(X, Y, func, n_jobs, **kwds) (134,217,856 bytes, 2.31%)</title>
+            <rect x="97.6864%" y="298" width="2.3085%" height="21" fill="rgb(255,227,227)" fg:x="5679521842" fg:w="134217856"/>
+            <text x="97.9364%" y="311.50"></text>
+        </g>
+        <g>
+            <title>/Users/mpiekenbrock/opt/miniconda3/envs/spri/lib/python3.11/site-packages/sklearn/metrics/pairwise.py:2195 (pairwise_distances) (134,217,856 bytes, 2.31%)</title>
+            <rect x="97.6864%" y="320" width="2.3085%" height="21" fill="rgb(255,227,227)" fg:x="5679521842" fg:w="134217856"/>
+            <text x="97.9364%" y="333.50"></text>
+        </g>
+        <g>
+            <title>            dm = pairwise_distances(X, metric=metric) (134,217,856 bytes, 2.31%)</title>
+            <rect x="97.6864%" y="342" width="2.3085%" height="21" fill="rgb(255,227,227)" fg:x="5679521842" fg:w="134217856"/>
+            <text x="97.9364%" y="355.50"></text>
+        </g>
+        <g>
+            <title>/Users/mpiekenbrock/opt/miniconda3/envs/spri/lib/python3.11/site-packages/ripser/ripser.py:286 (ripser) (134,217,856 bytes, 2.31%)</title>
+            <rect x="97.6864%" y="364" width="2.3085%" height="21" fill="rgb(255,227,227)" fg:x="5679521842" fg:w="134217856"/>
+            <text x="97.9364%" y="377.50"></text>
+        </g>
+        <g>
+            <title>out = ripser(X, maxdim=3, thresh=1.4) (134,217,856 bytes, 2.31%)</title>
+            <rect x="97.6864%" y="386" width="2.3085%" height="21" fill="rgb(255,227,227)" fg:x="5679521842" fg:w="134217856"/>
+            <text x="97.9364%" y="399.50"></text>
+        </g>
+        <g>
+            <title>benchmark_ripser_o3_4k.py:7 (&lt;module&gt;) (134,217,856 bytes, 2.31%)</title>
+            <rect x="97.6864%" y="408" width="2.3085%" height="21" fill="rgb(255,227,227)" fg:x="5679521842" fg:w="134217856"/>
+            <text x="97.9364%" y="421.50"></text>
+        </g>
+        <g>
+            <title>all (5,814,034,759 bytes, 100%)</title>
+            <rect x="0.0000%" y="100" width="100.0000%" height="21" fill="rgb(255,100,100)" fg:x="0" fg:w="5814034759"/>
+            <text x="0.2500%" y="113.50"></text>
+        </g>
+    </svg>
+</svg>
