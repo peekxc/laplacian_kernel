@@ -248,7 +248,7 @@ def construct_flag_dense_ap(N: int, dim: int, n: int, eps: float, weights: np.nd
   
 @nb.jit(nopython=True, parallel=True)
 def construct_flag_dense(N: int, dim: int, n: int, eps: float, weights: np.ndarray, BT: np.ndarray, S: np.ndarray, offset: int = 0):
-  """Constructs d-simplices of a dense flag complex up to 'eps', optionally discarding apparent pairs."""
+  """Constructs d-simplices of a dense flag complex up to 'eps'."""
   for tid in prange(N):
     s = offset + tid
     w = flag_weight(s, dim, n, weights, BT)

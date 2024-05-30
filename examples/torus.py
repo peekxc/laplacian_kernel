@@ -6,64 +6,47 @@ from set_cover.covers import neighbor_graph_ball, neighbor_graph_knn, neighbor_g
 from scipy.sparse.csgraph import floyd_warshall
 from landmark import landmarks
 from ripser import ripser
+from comb_laplacian.sampler import sample_torus_tube
 
-from bokeh.plotting import figure, show
-from bokeh.io import output_notebook
-output_notebook()
-
-def rs_torus_tube(n: int, r: float, b: int = "auto") -> np.ndarray:
-  """Rejection sampler for torus"""
-  x = array('f')
-  C_PI, R_PI = 2 * np.pi, 1 / np.pi
-  b = int(np.sqrt(n)) if b == "auto" else int(b)
-  while len(x) < n: 
-    theta = np.random.uniform(size=b, low=0, high=C_PI)
-    jac_theta = (1.0 + r * np.cos(theta)) / C_PI
-    density_threshold = np.random.uniform(size=b, low=0, high=R_PI)
-    x.extend(theta[jac_theta > density_threshold])
-  return np.array(x)[:n]
-
-## Based on TDAunif package by Cory Brunson
-## Which is based on the paper sampling from a manifold
-def sample_torus_tube(n: int, ar: int = 2, sd: int = 0, seed = None) -> np.ndarray:
-  """Uniform torus random sampler"""
-  np.random.seed(seed)
-  r = 1.0 / ar
-  theta = rs_torus_tube(n, r)
-  phi = np.random.uniform(size=n, low=0, high=2.0*np.pi)
-  res = np.c_[
-    (1 + r * np.cos(theta)) * np.cos(phi), 
-    (1 + r * np.cos(theta)) * np.sin(phi),
-    r * np.sin(theta)
-  ]
-  if sd != 0:
-    res += np.random.normal(size=res.shape, loc=0, scale=sd)
-  return res
+# from bokeh.plotting import figure, show
+# from bokeh.io import output_notebook
+# output_notebook()
 
 np.random.seed(1234)
-X = sample_torus_tube(7500)
-p = figure(width=300, height=300)
-p.scatter(*X[:,:2].T, size=5)
-show(p)
+X = sample_torus_tube(7500, seed=1234)
+X[:5,]
+# p = figure(width=300, height=300)
+# p.scatter(*X[:,:2].T, size=5)
+# show(p)
 
 D = squareform(pdist(X))
 con_radius = np.max(minimum_spanning_tree(D).data / 2.0)
 enc_radius = np.min(D.max(axis=1))
 r = con_radius + 0.15 * (enc_radius - con_radius)
 G = neighbor_graph_ball(X, radius=r, weighted=True)
-# DSP = floyd_warshall(G, directed=False) # 9m for 7500 
+# DSP = np.load("/Users/mpiekenbrock/laplacian_kernel/data/nbg_torus7500_geodesics.npz")['arr_0']
+DSP = floyd_warshall(G, directed=False) # 9m for 7500 
+# np.savetxt("/Users/mpiekenbrock/laplacian_kernel/data/nbg_torus7500_geodesics.lower_distance_matrix", squareform(DSP))
 # np.savez("/Users/mpiekenbrock/laplacian_kernel/nbg_torus7500_geodesics.npz", DSP)
-DSP = np.load("/Users/mpiekenbrock/laplacian_kernel/nbg_torus7500_geodesics.npz")['arr_0']
 # G = neighbor_graph_knn(X, k=40, weighted=True)
 # G = neighbor_graph_del(X, weighted=True)
 
 
-perm = landmarks(DSP, 800, radii=False)
+
+## Get ripser 
+/Users/mpiekenbrock/laplacian_kernel/data/nbg_torus7500_geodesics.npz
+perm = landmarks(DSP, 50, radii=False)
 DM = DSP[perm,:][:,perm]
 er = 0.5 * np.min(DM.max(axis=1))
+np.savetxt(f"/Users/mpiekenbrock/laplacian_kernel/data/nbg_torus{len(perm)}_geodesics.lower_distance_matrix", squareform(DM))
 
+# /usr/bin/time -lp ripser data/nbg_torus500_geodesics.lower_distance_matrix --dim 1 --threshold 2.3701083660125732 --format upper-distance >/dev/null
+ripser(DM, thresh=2*er, maxdim=1, distance_matrix=True)
 
-ripser(DM, thresh=2*er, maxdim=2)
+# import timeit149986568
+# timeit.timeit(lambda: ripser(DM, thresh=2*er, maxdim=2, distance_matrix=True), number = 1)
+# timeit.timeit(lambda: ripser(DM, maxdim=2, distance_matrix=True), number = 1)
+
 
 ## Sparse complex
 # import gudhi
@@ -82,6 +65,7 @@ from math import comb
 
 # w = squareform(DM)
 # BT = np.array([[int(comb(ni, ki)) for ni in range(len(X)+1)] for ki in range(6)]).astype(np.int64)
+59809792 / (1024**2)
 
 # import timeit
 # timeit.timeit(lambda: flag_simplices(DM, 2, eps=2*er, verbose=False, shortcut=False), number=10)
@@ -100,6 +84,10 @@ def bench(b: int):
 for d in 2**np.arange(16):
   time_per = timeit.timeit(lambda: bench(d), number=100) / d 
   print(f"{d}: time per: {time_per:.5f}, fraction: {d / comb(len(X), 3):.6f}")
+
+wut = np.load("/Users/mpiekenbrock/Downloads/nbg_torus1500_S_dim2.npy")
+len(wut)
+wut.nbytes / (1024**3)
 
 # from scipy.sparse import save_npz, load_npz
 # np.savez("torus7500.npz", X)

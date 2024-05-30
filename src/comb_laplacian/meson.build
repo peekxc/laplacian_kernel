@@ -13,7 +13,8 @@ python_sources = [
   'filtration_gpu.py', 
   'laplacian_cpu.py', 
   'laplacian_gpu.py',
-  'operators.py'
+  'operators.py', 
+  'sampler.py'
 ]
 
 ## Print install directory

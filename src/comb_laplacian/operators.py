@@ -131,18 +131,19 @@ class LaplacianSparse(LinearOperator, LaplacianABC):
   def __init__(self, 
     S: np.ndarray, F: np.ndarray, 
     n: int, k: int, 
-    gpu: bool = False, threadsperblock: int = 32, n_kernels: int = 1
+    precompute_deg: bool = True,
+    gpu: bool = False, threadsperblock: int = 32, n_kernels: int = 1, 
   ):
     from .laplacian_cpu import sp_precompute_deg
     assert k >= 2, "k must be at least 2"
     M,N = len(S), len(F)
-    super(LinearOperator, self).__init__(n, k, N, M, gpu) # calls LaplacianABC / excludes LinearOperator
+    super(LinearOperator, self).__init__(int(n), int(k), N, M, gpu) # calls LaplacianABC / excludes LinearOperator
     
     ## Precompute degree + allocate device memory
-    self.deg = self.xp.asarray(sp_precompute_deg(n,k,S,F,self.BT))
     self.S = self.xp.asarray(S)
     self.F = self.xp.asarray(F)
     self.F.sort() ## Required for searchsorted
+    self.deg = self.xp.asarray(sp_precompute_deg(n,k,S,F,self.BT)) if precompute_deg else self.xp.zeros(N, dtype=np.int64)
     self.nbytes += (self.deg.nbytes + self.S.nbytes + self.F.nbytes)
 
     if not gpu:
@@ -240,7 +241,7 @@ def flag_simplices(weights: np.ndarray, p: int, eps: float, n_blocks: int = 'aut
     construct_f(n_launches, dim=p, n=n, eps=eps, weights=weights, BT=BT, S=S_out, offset=offset)
     new_s = S_out[S_out != -1]
     if verbose: 
-      print(f"block: {n_blocks-bi}/{n_blocks}, {p}-simplices: {new_s.size}", flush=True)
+      print(f"block: {n_blocks-bi}/{n_blocks}, {p}-simplices: {new_s.size} / {n_launches}", flush=True)
     S.extend(new_s)
     if shortcut and len(new_s) == 0: 
       break ## Shortcut that is unclear why it works

@@ -1,0 +1,10 @@
+raw.githubusercontent.com/Ripser/ripser-benchmark/master/o3_4096.txt
+o3_4simplices.out
+*.bin
+*.npz
+*.out
+*.json
+*.lower_distance_matrix
+*.*matrix
+*.pickle
+*.html
