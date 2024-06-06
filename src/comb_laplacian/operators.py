@@ -239,6 +239,7 @@ def flag_simplices(weights: np.ndarray, p: int, eps: float, n_blocks: int = 'aut
 def rips_laplacian(
   X: np.ndarray, p: int, radius: float = "default", sparse: bool = True, 
   discard_ap: bool = True, sp_mat: bool = False, 
+  verbose: bool = False, 
   gpu: bool = False
 ):
   """Constructs a sparse Laplacian operator from a point cloud suitable for p-dimensional homology computations.
@@ -260,8 +261,8 @@ def rips_laplacian(
   
   ## Constructs the flag simplices
   if not sparse: 
-    F = flag_simplices(weights, p=p, eps=diam, discard_ap=False, verbose=False, shortcut=False)
-    S = flag_simplices(weights, p=p+1, eps=diam, discard_ap=True, verbose=False, shortcut=False)
+    F = flag_simplices(weights, p=p, eps=diam, discard_ap=False, verbose=verbose, shortcut=False)
+    S = flag_simplices(weights, p=p+1, eps=diam, discard_ap=discard_ap, verbose=verbose, shortcut=False)
     F.sort()
     L = LaplacianSparse(S=S, F=F, n=n, k=p+2, precompute_deg=True, gpu=False)
     return L
@@ -272,6 +273,8 @@ def rips_laplacian(
     DM = squareform(weights)
     rips_complex = gudhi.RipsComplex(distance_matrix=DM, max_edge_length=diam)
     st = rips_complex.create_simplex_tree()
+    if verbose: 
+      print(f"Expanding the sparse clique complex to dimension {p+1} (blockers={discard_ap})")
     if discard_ap: 
       blocker_fun = apparent_blocker(maxdim=p+1, n=n, eps=diam, weights=weights)
       blocker_fun(np.arange(p+1)) # compiles it

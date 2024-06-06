@@ -7,13 +7,13 @@ from landmark import landmarks
 from comb_laplacian.filtration_cpu import apparent_blocker, filter_flag_ap
 
 # X = np.loadtxt("https://raw.githubusercontent.com/Ripser/ripser-benchmark/master/o3_4096.txt")
-X = np.loadtext("/Users/mpiekenbrock/laplacian_kernel/data/o3_4096.txt")
+X = np.loadtxt("/Users/mpiekenbrock/laplacian_kernel/data/o3_4096.txt")
 w = pdist(X)
 n = len(X)
 
 from comb_laplacian.operators import rips_laplacian
 X = X[landmarks(X, 30)]
-rips_laplacian(X, p=1, discard_ap=True, sparse=False)
+rips_laplacian(X, p=1, radius=2*1.4, discard_ap=True, sparse=False)
 
 
 
@@ -51,10 +51,12 @@ s_neg_ap = np.fromfile('o3_4simplices_ap.bin', dtype=np.int64)
 
 
 from comb_laplacian import LaplacianSparse
-F = np.fromfile('o3_3simplices_4k.bin', dtype=np.int64)
+F = np.fromfile('/Users/mpiekenbrock/laplacian_kernel/data/o3_3simplices_4k.bin', dtype=np.int64)
 F.sort()
-S = np.fromfile('o3_4simplices_4k_ap.bin', dtype=np.int64)
-L = LaplacianSparse(S, F, n=len(X), k=5)
+S = np.fromfile('/Users/mpiekenbrock/laplacian_kernel/data/o3_4simplices_4k_ap.bin', dtype=np.int64)
+L = LaplacianSparse(S, F, n=4096, k=5, precompute_deg=True)
+
+
 
 
 

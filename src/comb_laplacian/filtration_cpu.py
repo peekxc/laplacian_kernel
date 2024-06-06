@@ -207,8 +207,6 @@ def apparent_blocker(maxdim: int, n: int, eps: float, weights: np.ndarray):
   @nb.jit(nopython=True)
   def _block(simplex: list) -> bool:
     dim = len(simplex) - 1
-    if dim > maxdim: 
-      return True
     w = flag_weight_labels(simplex, n, weights)
     if dim < maxdim and w <= eps:
       return False # accept simplex
