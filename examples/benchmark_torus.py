@@ -1,3 +1,6 @@
+# %% 
+from operator import ge
+from tempfile import TemporaryFile
 import numpy as np
 from ripser import ripser
 from array import array
@@ -11,12 +14,18 @@ from comb_laplacian.sampler import sample_torus_tube
 
 ## To generate the data
 # np.random.seed(1234)
-# X = sample_torus_tube(7500, seed=1234)
+X = sample_torus_tube(7500, seed=1234)
 # D = squareform(pdist(X))
 # con_radius = np.max(minimum_spanning_tree(D).data / 2.0)
 # enc_radius = np.min(D.max(axis=1))
 # r = con_radius + 0.15 * (enc_radius - con_radius)
 # G = neighbor_graph_ball(X, radius=r, weighted=True)
+
+# from pbsig.vis import figure_dgm
+# from ripser import ripser
+# from scipy.spatial.distance import pdist, squareform
+# np.sort(np.diff(ripser(squareform(pdist(X[landmarks(X, 100)])**(3.1)), maxdim=1, distance_matrix=True)['dgms'][1], axis=1).flatten())[-5:]
+# np.sort(np.diff(ripser(X[landmarks(X, 250)], maxdim=1)['dgms'][1], axis=1).flatten())[-5:]
 
 ## Preload the geodesic distances
 DSP = np.load("/Users/mpiekenbrock/laplacian_kernel/data/nbg_torus7500_geodesics.npz")['arr_0']
@@ -107,11 +116,11 @@ def profile_ripser_memray(
   return res['dgms']
 
 # %% Torus benchmarks with memray
-for n in (np.arange(1, 51) * 100):
+for n in (np.arange(26, 51) * 100):
   perm = landmarks(DSP, n, radii=False)
   DM = DSP[perm,:][:,perm]
   er = 0.5 * np.min(DM.max(axis=1))
-  profile_ripser_memray(DM, p=1, threshold=2*er, prefix="benchmarks/torus/", suffix="torus")
+  profile_ripser_memray(DM, p=1, threshold=2*er, prefix="benchmarks/torus/ripser/", suffix="torus")
   # dgm, bench = time_ripser(DM, p=1, ratio=1.0, verbose=True)
   # benchmarks[n] = bench
   print(n)
@@ -165,13 +174,14 @@ def profile_laplacian_memray(
   S = flag_simplices(weights, p=p+1, eps=threshold, discard_ap=True, verbose=True, shortcut=False)
   F = np.sort(F)
   with Tracker(prefix + output_prof, native_traces=True):  
-    L = LaplacianSparse(S=S, F=F, n=n, k=p+2, precompute_deg=False, gpu=False)
+    L = LaplacianSparse(S=S, F=F, n=n, k=p+2, precompute_deg=True, gpu=False)
   
   subprocess.run(f"memray stats --json -o {prefix + profile_base + '.json'} {prefix + output_prof}", shell=True, capture_output=True, check=True)
   return True
 
 p = 1
-for n in (np.arange(1, 51) * 100):
+# (np.arange(1, 51) * 100)
+for n in (4000 + np.arange(0,11)*100):
   perm = landmarks(DSP, n, radii=False)
   DM = DSP[perm,:][:,perm]
   er = 0.5 * np.min(DM.max(axis=1))
@@ -204,8 +214,6 @@ import pickle
 with open('benchmark_torus_laplacian.pickle', 'rb') as f:
   benchmarks_flag = pickle.load(f)
 
-
-
 from bokeh.plotting import figure, show
 from bokeh.io import output_notebook
 from bokeh.layouts import row
@@ -226,29 +234,123 @@ output_notebook()
 
 base_path = "/Users/mpiekenbrock/laplacian_kernel/benchmarks/torus/"
 
-N = np.arange(1,26) * 100
+N = np.arange(1,44) * 100
 watermark_laplacian = np.array([json.load(open(base_path + f"laplacian/laplacian_{n}_1_torus.json", 'r'))['metadata']['peak_memory'] for n in N])
 watermark_ripser = np.array([json.load(open(base_path + f"ripser/ripser_{n}_1_torus.json", 'r'))['metadata']['peak_memory'] for n in N])
 
 p = figure(
-  width=550, height=350, y_axis_type="log", 
+  width=500, height=350, y_axis_type="log",
   title="Peak Memory Usage (Torus, Rips H1 persistence)"
 )
+p.y_range = Range1d(10**4, 10**11)
 p.title.align = "center"
-p.scatter(N, watermark_laplacian, color='red')
-p.scatter(N, watermark_ripser, color='blue')
+p.line(N, watermark_laplacian, color='red', line_width=1.5, legend_label="1-Laplacian (R)")
+p.scatter(N, watermark_laplacian, color='red', line_width=0.5, line_color='black')
+p.line(N, watermark_ripser, color='blue', line_width=1.5, legend_label="Ripser (Z2)")
+p.scatter(N, watermark_ripser, color='blue', line_width=0.5, line_color='black')
 p.extra_y_ranges = {"prefix": p.y_range }
 right_axis = LogAxis(y_range_name="prefix", axis_label="SI Unit")
 right_axis.minor_tick_line_alpha = 0.0
 p.add_layout(right_axis, 'right')
-p.toolbar_location = None
+# p.toolbar_location = None
 p.yaxis[0].axis_label = "Bytes (log-scale)"
 p.yaxis[1].axis_label = "Bytes (SI Unit)"
-p.yaxis[1].major_label_overrides = {10**5: '100 KB', 10**6: '1 MB', 10**7: '10 MB', 10**8: '100 MB', 10**9: '1 GB', 10**10: '10 GB'}
+p.yaxis[1].major_label_overrides = {10**4: '10 KB', 10**5: '100 KB', 10**6: '1 MB', 10**7: '10 MB', 10**8: '100 MB', 10**9: '1 GB', 10**10: '10 GB', 10**11: '100 GB'}
 # p.yaxis[0].ticker.base = 2
+p.legend.location = "bottom_right"
+p.legend.title = "Method"
 p.xaxis.axis_label = "Number of vertices"
 show(p)
 
 
+
+
 #  ripser /var/folders/0l/b3dbb2_d2bb4y3wbbfk0wt_80000gn/T/tmpvuvn8tet.upper_distance_matrix --dim 1 --threshold 2.3701083660125732 --format upper-distance >/dev/null
 # /usr/bin/time -lp ripser ../data/nbg_torus500_geodesics.lower_distance_matrix --dim 1 --threshold 2.3701083660125732 --format upper-distance >/dev/null
+
+
+# %% 
+from comb_laplacian import LaplacianSparse, flag_simplices
+from primate.trace import hutch
+from scipy.sparse.linalg import eigsh
+X = sample_torus_tube(7500, seed=1234)
+D = pdist(X[landmarks(X, 500)])**3.0
+n = 500
+er = 0.5*np.min(squareform(D).max(axis=1))
+p = 1
+F = flag_simplices(D, p=p, eps=2*er, discard_ap=False, verbose=True, shortcut=False)
+S = flag_simplices(D, p=p+1, eps=2*er, discard_ap=True, verbose=True, shortcut=False)
+F = np.sort(F)
+
+def get_peak_memory(fun):
+  import json
+  from memray import Tracker 
+  from tempfile import NamedTemporaryFile
+  import subprocess
+  with NamedTemporaryFile() as fn: 
+    pass
+  with Tracker(fn.name, native_traces=True):  
+    fun()
+  subprocess.run(f"memray stats --json -o {fn.name + '.json'} {fn.name}", shell=True, capture_output=True, check=True)
+  return json.load(open(fn.name + '.json', 'r'))['metadata']['peak_memory'], fn.name
+
+
+def init_laplacian():
+  L = LaplacianSparse(S=S, F=F, n=n, k=p+2, gpu=False)
+  tr_est = hutch(L, maxiter=130, deg=50, orth=30, ncv=30, num_threads=1)
+  # x = np.zeros(100000)
+
+get_peak_memory(init_laplacian)
+
+
+M = L.tocoo().todense()
+M_rank = np.linalg.matrix_rank(M)
+
+M_rank / L.shape[0]
+
+top_ew = eigsh(M, k = 1, which='LM', return_eigenvectors=False)
+ew = np.linalg.eigh(M)[0]
+tol = M.shape[0] * top_ew * np.finfo(M.dtype).eps 
+gap = np.min(ew[ew > tol])
+
+
+vol = np.sum(L.deg)
+gap_est = 0.5 * (2/vol)**2
+tol = 166.227 * L.shape[0] * np.finfo(L.dtype).eps
+hutch(M, fun="smoothstep", deg=40, maxiter=5, a=0.1*gap, b=gap) / L.shape[0]
+
+
+
+def profile_laplacian_memray_inline(
+  weights: np.ndarray, p: int, threshold: float = None, 
+  prefix: str = "", 
+  suffix: str = None
+):
+  from tempfile import NamedTemporaryFile
+  import subprocess
+  from memray import Tracker
+  from combin import inverse_choose
+  assert weights.ndim == 1 
+  n = inverse_choose(len(weights), 2)
+
+  with NamedTemporaryFile() as fn: 
+    pass
+  fn.name
+  
+  ## First construct the complex;
+  F = flag_simplices(weights, p=p, eps=threshold, discard_ap=False, verbose=True, shortcut=False)
+  S = flag_simplices(weights, p=p+1, eps=threshold, discard_ap=True, verbose=True, shortcut=False)
+  F = np.sort(F)
+  with Tracker(fn.name, native_traces=True):  
+    L = LaplacianSparse(S=S, F=F, n=n, k=p+2, precompute_deg=True, gpu=False)
+  
+  subprocess.run(f"memray stats --json -o {prefix + profile_base + '.json'} {prefix + output_prof}", shell=True, capture_output=True, check=True)
+  return True
+
+
+u = 2500
+p = figure(width=300, height=250, y_axis_type="log")
+p.line(np.linspace(0, u), np.linspace(0, u), color='red')
+p.line(np.linspace(0, u), np.linspace(0, u)**2, color='blue')
+# p.line(np.linspace(0, 5000), 0.001 * np.linspace(0, 15000)**3, color='blue')
+show(p)

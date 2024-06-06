@@ -60,7 +60,7 @@ def laplacian1_matvec(x: np.ndarray, y: np.ndarray, n: int, k: int, N: int, BT: 
 from combin import rank_to_comb, comb_to_rank
 from itertools import combinations
 from math import comb
-n, k = 500, 3
+n, k = 50, 3
 BT = np.array([[comb(ni, ki) for ni in range(n)] for ki in range(k+2)]).astype(np.int64)
 
 k_faces = np.zeros(k, dtype=np.int64)

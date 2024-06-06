@@ -201,7 +201,9 @@ def zero_facet_flag(simplex: int, dim: int, weight: float, n: int, weights: np.n
 #       break
 #   return zero_facet
 
-def apparent_blocker(maxdim: int, n: int, eps: float, weights: np.ndarray, BT: np.ndarray):
+def apparent_blocker(maxdim: int, n: int, eps: float, weights: np.ndarray):
+  from math import comb
+  BT = np.array([[int(comb(ni, ki)) for ni in range(n+1)] for ki in range(maxdim+3)]).astype(np.int64)
   @nb.jit(nopython=True)
   def _block(simplex: list) -> bool:
     dim = len(simplex) - 1

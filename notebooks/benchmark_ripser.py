@@ -9,11 +9,13 @@ import gudhi
 from comb_laplacian.filtration_cpu import apparent_blocker, filter_flag_ap
 
 X = np.loadtxt("https://raw.githubusercontent.com/Ripser/ripser-benchmark/master/o3_4096.txt")
-# X = X[landmarks(X, 1500)]
+X = X[landmarks(X, 1500)]
 w = pdist(X)
 n = len(X)
 BT = np.array([[int(comb(ni, ki)) for ni in range(n+1)] for ki in range(7)]).astype(np.int64)
 eps = 1.4 # np.median(w)
+
+comb_to_rank(o3_3simplices, order='colex', n=n)
 
 ## Sparse complex
 rips_complex = gudhi.RipsComplex(
@@ -30,10 +32,6 @@ o3_3_simplices = np.array([comb_to_rank(s, order='colex', n=len(X)) for s in o3_
 o3_3_simplices = np.array(o3_3_simplices, dtype=np.int64)
 o3_3_simplices.tofile("o3_3simplices_4k.bin")
 
-
-C.sort(axis=1)
-C = np.fliplr(C) if colex_order else C
-C = np.array(C, order='K', copy=True)
 
 blocker_fun = apparent_blocker(maxdim=2, n=len(X), eps=eps, weights=w, BT=BT)
 blocker_fun(np.arange(5)) # compiles it

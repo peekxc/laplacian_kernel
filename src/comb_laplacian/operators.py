@@ -24,6 +24,7 @@ class LaplacianABC():
     self.N = N ## num of (k-2)-simplices, comb(n,k-1)
     self.M = M ## num of (k-1)-simplices, comb(n,k)
     self.BT = np.array([[comb(ni, ki) for ni in range(n+1)] for ki in range(k+2)]).astype(np.int64)
+    assert np.all(self.BT >= 0), "Binomial coefficient calculation failed"
     self.shape = (self.N, self.N)
     self.dtype = np.dtype('float32')
 
@@ -138,7 +139,7 @@ class LaplacianSparse(LinearOperator, LaplacianABC):
     assert k >= 2, "k must be at least 2"
     M,N = len(S), len(F)
     super(LinearOperator, self).__init__(int(n), int(k), N, M, gpu) # calls LaplacianABC / excludes LinearOperator
-    
+
     ## Precompute degree + allocate device memory
     self.S = self.xp.asarray(S)
     self.F = self.xp.asarray(F)
@@ -193,20 +194,6 @@ class LaplacianSparse(LinearOperator, LaplacianABC):
   # def tocoo(self):
   #   return LaplacianABC.tocoo(self)
 
-def rips_laplacian(X: np.ndarray, p: int = 0, radius: float = "default", sp_mat: bool = False, gpu: bool = False):
-  from scipy.spatial.distance import pdist, cdist, squareform
-  weights = pdist(X)
-  if radius == "default":
-    radius = 0.5 * np.min(np.max(squareform(weights), axis=1)) # enclosing radius 
-  assert isinstance(radius, Number), "Radius must be a number or 'default'."
-  
-  ## Constants
-  n,k,diam = len(X), p+2, 2 * radius
-  
-
-
-  pass 
-
 ## Blocked approach to constructing the simplices of a flag filtration up to some threshold
 def flag_simplices(weights: np.ndarray, p: int, eps: float, n_blocks: int = 'auto', discard_ap: bool = True, verbose: bool = False, shortcut: bool = True):
   from .filtration_cpu import construct_flag_dense_ap, construct_flag_dense
@@ -247,6 +234,60 @@ def flag_simplices(weights: np.ndarray, p: int, eps: float, n_blocks: int = 'aut
       break ## Shortcut that is unclear why it works
   del S_out 
   return np.asarray(S, dtype=np.int64)
+
+
+def rips_laplacian(
+  X: np.ndarray, p: int, radius: float = "default", sparse: bool = True, 
+  discard_ap: bool = True, sp_mat: bool = False, 
+  gpu: bool = False
+):
+  """Constructs a sparse Laplacian operator from a point cloud suitable for p-dimensional homology computations.
+  
+  This function constructs the (p/p+1)-simplices needed to compute p-dimensional homology via a Laplacian operator. 
+  Optionally, 
+  0-Laplacian <=> vertex/edge (graph) Laplacian 
+  1-Laplacian <=> edge/triangle (mesh) Laplacian
+
+  """
+  from scipy.spatial.distance import pdist, cdist, squareform
+  weights = pdist(X)
+  if radius == "default":
+    radius = 0.5 * np.min(np.max(squareform(weights), axis=1)) # enclosing radius 
+  assert isinstance(radius, Number), "Radius must be a number or 'default'."
+  
+  ## Constants
+  n,diam = len(X), 2*radius
+  
+  ## Constructs the flag simplices
+  if not sparse: 
+    F = flag_simplices(weights, p=p, eps=diam, discard_ap=False, verbose=False, shortcut=False)
+    S = flag_simplices(weights, p=p+1, eps=diam, discard_ap=True, verbose=False, shortcut=False)
+    F.sort()
+    L = LaplacianSparse(S=S, F=F, n=n, k=p+2, precompute_deg=True, gpu=False)
+    return L
+  else: 
+    from combin import comb_to_rank
+    from comb_laplacian.filtration_cpu import apparent_blocker
+    import gudhi
+    DM = squareform(weights)
+    rips_complex = gudhi.RipsComplex(distance_matrix=DM, max_edge_length=diam)
+    st = rips_complex.create_simplex_tree()
+    if discard_ap: 
+      blocker_fun = apparent_blocker(maxdim=p+1, n=n, eps=diam, weights=weights)
+      blocker_fun(np.arange(p+1)) # compiles it
+      st.expansion_with_blocker(p+1, blocker_fun)
+    else:
+      st.expansion(p+1)
+    S_vert = np.array([s for s, fv in st.get_simplices() if len(s) == (p+2)])
+    F_vert = np.array([s for s, fv in st.get_simplices() if len(s) == (p+1)])
+    S = comb_to_rank(S_vert, order='colex', n=n, k=p+2)
+    F = comb_to_rank(F_vert, order='colex', n=n, k=p+1)
+    F.sort()
+    L = LaplacianSparse(S=S, F=F, n=n, k=p+2, precompute_deg=True, gpu=False)
+    return L
+
+
+
 
 ## From: https://stackoverflow.com/questions/3160699/python-progress-bar
 # def progressbar(it, count=None, prefix="", size=60, out=sys.stdout, f: Callable = None, newline: bool = True): # Python3.6+

@@ -6,10 +6,16 @@ from combin import rank_to_comb, comb_to_rank
 from landmark import landmarks
 from comb_laplacian.filtration_cpu import apparent_blocker, filter_flag_ap
 
-X = np.loadtxt("https://raw.githubusercontent.com/Ripser/ripser-benchmark/master/o3_4096.txt")
+# X = np.loadtxt("https://raw.githubusercontent.com/Ripser/ripser-benchmark/master/o3_4096.txt")
+X = np.loadtext("/Users/mpiekenbrock/laplacian_kernel/data/o3_4096.txt")
 w = pdist(X)
 n = len(X)
-BT = np.array([[int(comb(ni, ki)) for ni in range(n+1)] for ki in range(7)]).astype(np.int64)
+
+from comb_laplacian.operators import rips_laplacian
+X = X[landmarks(X, 30)]
+rips_laplacian(X, p=1, discard_ap=True, sparse=False)
+
+
 
 ## Read file in
 o3_4 = np.fromfile('/Users/mpiekenbrock/laplacian_kernel/o3_4simplices_4k.bin', dtype=np.int64)
